@@ -62,11 +62,11 @@ In this project, spin-up saves **effective viscosity η** to the grid NPZ as a *
 ### Strain-rate tensor
 
 In plan-view (xy) models, icepack defines the horizontal strain-rate tensor as the symmetric gradient:
-
+$
 \[
 \dot\varepsilon = \frac{1}{2}\left(\nabla u + \nabla u^{\mathsf T}\right)
 \]
-
+$
 (`icepack.calculus.sym_grad`)
 
 ### Effective strain rate (regularized)
