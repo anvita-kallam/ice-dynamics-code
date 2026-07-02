@@ -1,0 +1,33 @@
+# Environment and local tooling
+env/
+.venv/
+venv/
+.cursor/
+.agent/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+
+# Large regenerable simulation artifacts
+outputs/logs/
+outputs/**/*.npz
+outputs/**/*.h5
+outputs/**/*.png
+
+# Secrets
+.env
+.env.*
+*.pem
+credentials.json
