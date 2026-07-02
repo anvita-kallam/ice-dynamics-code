@@ -10,18 +10,30 @@ Reference for the **Shallow Shelf / Shallow Stream Approximation (SSA)** as impl
 
 The Ice Dynamics spin-up notebooks (`notebooks/spinup/spinupNewFull-*.ipynb`) use **`IceStream`** via `icepack.solvers.FlowSolver`.
 
+> **Math rendering:** Display equations use `$$...$$` and inline symbols use `$...$` (GitHub, VS Code, and most Jupyter markdown renderers).
+
 ---
 
 ## Overview
 
-icepack solves SSA through a **variational (action) principle**, not by assembling a PDE residual directly. The horizontal ice velocity **u** is found by minimizing an action functional **J** (units: power = energy/time). The Euler–Lagrange equations of **J** are equivalent to the standard SSA momentum balance.
+icepack solves SSA through a **variational (action) principle**, not by assembling a PDE residual directly. The horizontal ice velocity $\mathbf{u}$ is found by minimizing an action functional $J$ (units: power = energy/time). The Euler–Lagrange equations of $J$ are equivalent to the standard SSA momentum balance:
+
+$$
+\frac{\delta J}{\delta \mathbf{u}} = 0.
+$$
 
 | icepack class | Name in literature | Regime |
 |---------------|-------------------|--------|
 | `IceStream` | Shallow **Stream** Approximation (SSA, grounded) | Fast grounded ice with basal sliding |
 | `IceShelf` | Shallow **Shelf** Approximation (SSA, floating) | Ice shelves in hydrostatic balance |
 
-Both are 2D, depth-averaged models derived from the Blatter–Pattyn (first-order) system by assuming **plug flow** (horizontal extension dominates over vertical shear: ∂u/∂z ≪ ∂u/∂x). See MacAyeal (1989) and Shapero et al. (2021, §2.2.2).
+Both are 2D, depth-averaged models derived from the Blatter–Pattyn (first-order) system by assuming **plug flow** (horizontal extension dominates over vertical shear):
+
+$$
+\left|\frac{\partial \mathbf{u}}{\partial z}\right| \ll \left|\frac{\partial \mathbf{u}}{\partial x}\right|.
+$$
+
+See MacAyeal (1989) and Shapero et al. (2021, §2.2.2).
 
 ---
 
@@ -31,14 +43,14 @@ icepack uses **meters, years, megapascals (MPa)** (same convention as Elmer/Ice)
 
 | Symbol | Meaning | Default in icepack |
 |--------|---------|-------------------|
-| n | Glen flow-law exponent | 3 (`glen_flow_law`) |
-| m | Weertman sliding exponent | 3 (`weertman_sliding_law`) |
-| ε̇_min | Strain-rate regularization | 10⁻⁵ yr⁻¹ (`strain_rate_min`) |
-| ρ_I | Ice density | 917 kg m⁻³ (scaled in code) |
-| ρ_W | Seawater density | 1024 kg m⁻³ (scaled in code) |
-| g | Gravity | 9.81 m yr⁻² (scaled in code) |
-| A | Fluidity (Glen rate factor) | User field (`fluidity` argument) |
-| C | Basal friction coefficient | User field (`friction` argument) |
+| $n$ | Glen flow-law exponent | $3$ (`glen_flow_law`) |
+| $m$ | Weertman sliding exponent | $3$ (`weertman_sliding_law`) |
+| $\dot\varepsilon_{\min}$ | Strain-rate regularization | $10^{-5}\,\mathrm{yr}^{-1}$ (`strain_rate_min`) |
+| $\rho_I$ | Ice density | $917\,\mathrm{kg\,m^{-3}}$ (scaled in code) |
+| $\rho_W$ | Seawater density | $1024\,\mathrm{kg\,m^{-3}}$ (scaled in code) |
+| $g$ | Gravity | $9.81\,\mathrm{m\,yr^{-2}}$ (scaled in code) |
+| $A$ | Fluidity (Glen rate factor) | User field (`fluidity` argument) |
+| $C$ | Basal friction coefficient | User field (`friction` argument) |
 
 ---
 
@@ -46,14 +58,14 @@ icepack uses **meters, years, megapascals (MPa)** (same convention as Elmer/Ice)
 
 | Symbol | Name | Role |
 |--------|------|------|
-| **u** | Horizontal velocity (2D vector) | Unknown in diagnostic solve |
-| h | Ice thickness | Input geometry |
-| s | Surface elevation | Input geometry |
-| b | Bed elevation | Used to define s = b + h (grounded) |
-| A | Fluidity | Rheology parameter (inverse viscosity scale) |
-| C | Basal friction coefficient | Sliding law strength (grounded only) |
+| $\mathbf{u}$ | Horizontal velocity (2D vector) | Unknown in diagnostic solve |
+| $h$ | Ice thickness | Input geometry |
+| $s$ | Surface elevation | Input geometry |
+| $b$ | Bed elevation | Grounded: $s = b + h$ |
+| $A$ | Fluidity | Rheology parameter (inverse viscosity scale) |
+| $C$ | Basal friction coefficient | Sliding law strength (grounded only) |
 
-In this project, spin-up saves **effective viscosity η** to the grid NPZ as a **diagnostic** of the solved velocity and fluidity — it is not an independent input to the SSA solve.
+In this project, spin-up saves **effective viscosity** $\eta$ to the grid NPZ as a **diagnostic** of the solved velocity and fluidity — it is not an independent input to the SSA solve.
 
 ---
 
@@ -61,43 +73,39 @@ In this project, spin-up saves **effective viscosity η** to the grid NPZ as a *
 
 ### Strain-rate tensor
 
-In plan-view (xy) models, icepack defines the horizontal strain-rate tensor as the symmetric gradient:
+In plan-view ($xy$) models, icepack defines the horizontal strain-rate tensor as the symmetric gradient (`icepack.calculus.sym_grad`):
 
-\[
-\dot\varepsilon = \frac{1}{2}\left(\nabla u + \nabla u^{\mathsf T}\right)
-\]
-
-(`icepack.calculus.sym_grad`)
+$$
+\dot{\boldsymbol{\varepsilon}} = \frac{1}{2}\left(\nabla \mathbf{u} + \nabla \mathbf{u}^{\mathsf{T}}\right).
+$$
 
 ### Effective strain rate (regularized)
 
 To avoid singularities at zero strain rate:
 
-\[
-\dot\varepsilon_e = \sqrt{\frac{1}{2}\left(\dot\varepsilon : \dot\varepsilon + (\mathrm{tr}\,\dot\varepsilon)^2 + \dot\varepsilon_{\min}^2\right)}
-\]
+$$
+\dot\varepsilon_e = \sqrt{\frac{1}{2}\left(\dot{\boldsymbol{\varepsilon}} : \dot{\boldsymbol{\varepsilon}} + (\mathrm{tr}\,\dot{\boldsymbol{\varepsilon}})^2 + \dot\varepsilon_{\min}^2\right)}.
+$$
 
 ### Glen flow law
 
-\[
-\dot\varepsilon = A\,|\tau|^{n-1}\,\tau
-\]
+$$
+\dot{\boldsymbol{\varepsilon}} = A\,|\boldsymbol{\tau}|^{n-1}\,\boldsymbol{\tau},
+$$
 
-where **τ** is the deviatoric stress tensor and **A** is the temperature-dependent fluidity (scalar field in icepack).
+where $\boldsymbol{\tau}$ is the deviatoric stress tensor and $A$ is the temperature-dependent fluidity (scalar field in icepack).
 
 ### Membrane stress tensor
 
-For depth-averaged SSA, icepack uses a **membrane stress** tensor **M**:
+For depth-averaged SSA, icepack uses a **membrane stress** tensor $\mathbf{M}$ (`icepack.models.viscosity.membrane_stress`):
 
-\[
-M = 2\mu\left(\dot\varepsilon + (\mathrm{tr}\,\dot\varepsilon)\,I\right),
+$$
+\mathbf{M} = 2\mu\left(\dot{\boldsymbol{\varepsilon}} + (\mathrm{tr}\,\dot{\boldsymbol{\varepsilon}})\,\mathbf{I}\right),
 \qquad
-\mu = \tfrac{1}{2}\,A^{-1/n}\,\dot\varepsilon_e^{\,1/n - 1}
-\]
+\mu = \frac{1}{2}\,A^{-1/n}\,\dot\varepsilon_e^{\,1/n - 1}.
+$$
 
-(`icepack.models.viscosity.membrane_stress`)
-
-The depth-averaged Cauchy stress is related to **M** through the vertical integration that produces the SSA system.
+The depth-averaged Cauchy stress is related to $\mathbf{M}$ through the vertical integration that produces the SSA system.
 
 ---
 
@@ -105,22 +113,20 @@ The depth-averaged Cauchy stress is related to **M** through the vertical integr
 
 All icepack diagnostic models minimize:
 
-\[
-J = J_{\text{visc}} + J_{\text{fric}} + J_{\text{side}} - J_{\text{grav}} - J_{\text{term}} + J_{\text{penalty}}
-\]
+$$
+J = J_{\mathrm{visc}} + J_{\mathrm{fric}} + J_{\mathrm{side}} - J_{\mathrm{grav}} - J_{\mathrm{term}} + J_{\mathrm{penalty}}.
+$$
 
 (terms absent in a given model are omitted)
 
 | Term | Physical meaning |
 |------|------------------|
-| J_visc | Viscous dissipation (membrane / Glen) |
-| J_fric | Basal sliding friction (grounded only) |
-| J_side | Sidewall drag along fjord walls |
-| J_grav | Gravitational driving (surface slope or buoyancy) |
-| J_term | Stress work at calving / grounding line |
-| J_penalty | Penalty for normal flow at sidewalls |
-
-The velocity **u** satisfies **δJ/δu = 0** (weak form solved by Newton in `FlowSolver.diagnostic_solve`).
+| $J_{\mathrm{visc}}$ | Viscous dissipation (membrane / Glen) |
+| $J_{\mathrm{fric}}$ | Basal sliding friction (grounded only) |
+| $J_{\mathrm{side}}$ | Sidewall drag along fjord walls |
+| $J_{\mathrm{grav}}$ | Gravitational driving (surface slope or buoyancy) |
+| $J_{\mathrm{term}}$ | Stress work at calving / grounding line |
+| $J_{\mathrm{penalty}}$ | Penalty for normal flow at sidewalls |
 
 ---
 
@@ -128,23 +134,23 @@ The velocity **u** satisfies **δJ/δu = 0** (weak form solved by Newton in `Flo
 
 From `viscosity_depth_averaged()`:
 
-\[
-J_{\text{visc}} = \int_\Omega \frac{2n}{n+1}\, h\, A^{-1/n}\, \dot\varepsilon_e^{\,1/n + 1}\, \mathrm{d}x
-\]
+$$
+J_{\mathrm{visc}} = \int_\Omega \frac{2n}{n+1}\, h\, A^{-1/n}\, \dot\varepsilon_e^{\,1/n + 1}\,\mathrm{d}x.
+$$
 
 The GMD paper (Eq. 10) writes an equivalent form:
 
-\[
-J_{\text{visc}} = \int_\Omega \frac{n}{n+1}\, h\, A^{-1/n}\, |\dot\varepsilon|^{1/n + 1}\, \mathrm{d}x
-\]
+$$
+J_{\mathrm{visc}} = \int_\Omega \frac{n}{n+1}\, h\, A^{-1/n}\, |\dot{\boldsymbol{\varepsilon}}|^{1/n + 1}\,\mathrm{d}x.
+$$
 
 The two expressions use slightly different tensor-norm conventions but represent the same Glen dissipation.
 
-With **n = 3**:
+With $n = 3$:
 
-\[
-J_{\text{visc}} = \int_\Omega \frac{3}{2}\, h\, A^{-1/3}\, \dot\varepsilon_e^{\,4/3}\, \mathrm{d}x
-\]
+$$
+J_{\mathrm{visc}} = \int_\Omega \frac{3}{2}\, h\, A^{-1/3}\, \dot\varepsilon_e^{\,4/3}\,\mathrm{d}x.
+$$
 
 ---
 
@@ -152,68 +158,75 @@ J_{\text{visc}} = \int_\Omega \frac{3}{2}\, h\, A^{-1/3}\, \dot\varepsilon_e^{\,
 
 ### Total action
 
-\[
-J = J_{\text{visc}} + J_{\text{fric}} + J_{\text{side}} - J_{\text{grav}} - J_{\text{term}} + J_{\text{penalty}}
-\]
+$$
+J = J_{\mathrm{visc}} + J_{\mathrm{fric}} + J_{\mathrm{side}} - J_{\mathrm{grav}} - J_{\mathrm{term}} + J_{\mathrm{penalty}}.
+$$
 
 ### Basal friction (Weertman law)
 
 Basal shear stress:
 
-\[
-\tau_b = -C\,|u|^{1/m - 1}\,u
-\]
+$$
+\boldsymbol{\tau}_b = -C\,|\mathbf{u}|^{1/m - 1}\,\mathbf{u}.
+$$
 
 Friction contribution to the action (`bed_friction`):
 
-\[
-J_{\text{fric}} = -\frac{m}{m+1} \int_\Omega \tau_b \cdot u\,\mathrm{d}x
-= \frac{m}{m+1} \int_\Omega C\,|u|^{1/m + 1}\,\mathrm{d}x
-\]
+$$
+\begin{aligned}
+J_{\mathrm{fric}}
+&= -\frac{m}{m+1} \int_\Omega \boldsymbol{\tau}_b \cdot \mathbf{u}\,\mathrm{d}x \\
+&= \frac{m}{m+1} \int_\Omega C\,|\mathbf{u}|^{1/m + 1}\,\mathrm{d}x.
+\end{aligned}
+$$
 
-With **m = 3**: basal drag magnitude scales as **C |u|²**.
+With $m = 3$, basal drag magnitude scales as $C\,|\mathbf{u}|^2$.
 
-Smaller **C** → more sliding. The Ice Dynamics spin-up cases use small **C** (more sliding) vs large **C** (effectively no sliding).
+Smaller $C$ → more sliding. The Ice Dynamics spin-up cases use small $C$ (more sliding) vs large $C$ (effectively no sliding).
 
 ### Gravitational driving
 
-\[
-J_{\text{grav}} = -\int_\Omega \rho_I\, g\, h\, \nabla s \cdot u\,\mathrm{d}x
-\]
+$$
+J_{\mathrm{grav}} = -\int_\Omega \rho_I\, g\, h\, \nabla s \cdot \mathbf{u}\,\mathrm{d}x.
+$$
 
-This is the work done by the driving stress **ρ_I g h ∇s** against the ice flow.
+This is the work done by the driving stress $\rho_I g h \nabla s$ against the ice flow.
 
 ### Calving / marine terminus (grounded)
 
-\[
-J_{\text{term}} = \int_\Gamma \left(\frac{1}{2}\rho_I g h^2 - \frac{1}{2}\rho_W g d^2\right) u \cdot \nu\,\mathrm{d}\gamma
-\]
+$$
+J_{\mathrm{term}} = \int_\Gamma \left(\frac{1}{2}\rho_I g h^2 - \frac{1}{2}\rho_W g d^2\right) \mathbf{u} \cdot \boldsymbol{\nu}\,\mathrm{d}\gamma,
+$$
 
 where:
 
-- **Γ** is the ice front boundary
-- **ν** is the outward unit normal
-- **d = min(s − h, 0)** is water depth (sea level at z = 0)
+- $\Gamma$ is the ice front boundary
+- $\boldsymbol{\nu}$ is the outward unit normal
+- $d = \min(s - h,\, 0)$ is water depth (sea level at $z = 0$)
 
 ### Sidewall friction (optional)
 
 On boundary IDs marked as sidewalls:
 
-\[
-J_{\text{side}} = -\frac{m}{m+1} \int_\Gamma h\,\tau_s(u_t) \cdot u_t\,\mathrm{d}\gamma
-\]
+$$
+J_{\mathrm{side}} = -\frac{m}{m+1} \int_\Gamma h\,\boldsymbol{\tau}_s(\mathbf{u}_t) \cdot \mathbf{u}_t\,\mathrm{d}\gamma,
+$$
 
-where **u_t** is the velocity component tangent to the wall and **τ_s** has the same Weertman form as basal friction with coefficient **C_s**.
+where $\mathbf{u}_t$ is the velocity tangent to the wall and $\boldsymbol{\tau}_s$ has the same Weertman form as basal friction with coefficient $C_s$.
 
 ### Strong-form momentum balance (grounded)
 
-Taking the first variation of **J** with respect to **u** gives the standard MacAyeal SSA system:
+Taking the first variation of $J$ with respect to $\mathbf{u}$ gives the standard MacAyeal SSA system:
 
-\[
-\nabla \cdot (h\sigma) + \rho_I g h\,\nabla s - \tau_b = 0
-\]
+$$
+\nabla \cdot (h\boldsymbol{\sigma}) + \rho_I g h\,\nabla s - \boldsymbol{\tau}_b = \mathbf{0},
+$$
 
-where **σ** is the depth-averaged membrane stress derived from Glen's law, and **τ_b = C|u|^{1/m−1} u**.
+where $\boldsymbol{\sigma}$ is the depth-averaged membrane stress derived from Glen's law, and
+
+$$
+\boldsymbol{\tau}_b = C\,|\mathbf{u}|^{1/m-1}\,\mathbf{u}.
+$$
 
 In words: **divergence of membrane stress** + **driving stress** = **basal drag**.
 
@@ -223,33 +236,33 @@ In words: **divergence of membrane stress** + **driving stress** = **basal drag*
 
 For floating ice:
 
-- Basal friction **C = 0**
-- Hydrostatic surface: **s = (1 − ρ_I/ρ_W) h**
+- Basal friction $C = 0$
+- Hydrostatic surface: $s = \left(1 - \rho_I/\rho_W\right) h$
 - icepack uses an integrated-by-parts form where the shelf gravity and terminus terms are related
 
 Define the **buoyancy-adjusted density**:
 
-\[
-\varrho = \rho_I\left(1 - \frac{\rho_I}{\rho_W}\right)
-\]
+$$
+\varrho = \rho_I\left(1 - \frac{\rho_I}{\rho_W}\right).
+$$
 
 ### Buoyancy / gravity
 
-\[
-J_{\text{grav}} = -\frac{1}{2}\int_\Omega \varrho\, g\, \nabla(h^2) \cdot u\,\mathrm{d}x
-\]
+$$
+J_{\mathrm{grav}} = -\frac{1}{2}\int_\Omega \varrho\, g\, \nabla(h^2) \cdot \mathbf{u}\,\mathrm{d}x.
+$$
 
 ### Terminus
 
-\[
-J_{\text{term}} = \frac{1}{2}\int_\Gamma \varrho\, g\, h^2\, u \cdot \nu\,\mathrm{d}\gamma
-\]
+$$
+J_{\mathrm{term}} = \frac{1}{2}\int_\Gamma \varrho\, g\, h^2\, \mathbf{u} \cdot \boldsymbol{\nu}\,\mathrm{d}\gamma.
+$$
 
 ### Strong-form momentum balance (floating)
 
-\[
-\nabla \cdot (h\sigma) + \varrho\, g\, h\,\nabla h = 0
-\]
+$$
+\nabla \cdot (h\boldsymbol{\sigma}) + \varrho\, g\, h\,\nabla h = \mathbf{0}.
+$$
 
 This is the shelf SSA balance: membrane stress divergence balances the buoyancy-driven driving stress.
 
@@ -259,16 +272,16 @@ This is the shelf SSA balance: membrane stress divergence balances the buoyancy-
 
 SSA diagnostic solves are coupled to thickness evolution via the continuity equation (`icepack.models.transport.Continuity`):
 
-\[
-\frac{\partial h}{\partial t} + \nabla \cdot (h u) = \dot a_s - \dot a_b
-\]
+$$
+\frac{\partial h}{\partial t} + \nabla \cdot (h \mathbf{u}) = \dot a_s - \dot a_b.
+$$
 
 | Symbol | Meaning |
 |--------|---------|
-| ẋ_a_s | Surface mass balance |
-| ẋ_a_b | Basal mass balance |
+| $\dot a_s$ | Surface mass balance |
+| $\dot a_b$ | Basal mass balance |
 
-icepack's prognostic solver truncates **h** to zero where it becomes negative (approximate ice margin tracking).
+icepack's prognostic solver truncates $h$ to zero where it becomes negative (approximate ice margin tracking).
 
 ---
 
@@ -276,9 +289,9 @@ icepack's prognostic solver truncates **h** to zero where it becomes negative (a
 
 | Type | Implementation |
 |------|----------------|
-| **Inflow Dirichlet** | Prescribe **u** where ice flows in |
-| **Calving / terminus** | Natural (Neumann) via **J_term** |
-| **Sidewalls** | No normal flow via penalty; tangential drag via **J_side** |
+| **Inflow Dirichlet** | Prescribe $\mathbf{u}$ where ice flows in |
+| **Calving / terminus** | Natural (Neumann) via $J_{\mathrm{term}}$ |
+| **Sidewalls** | No normal flow via penalty; tangential drag via $J_{\mathrm{side}}$ |
 | **Outflow** | Natural where ice flows out |
 
 ---
@@ -302,7 +315,7 @@ u = solver.diagnostic_solve(
 )
 ```
 
-`FlowSolver` minimizes **J** using Newton's method on the weak form. The action is convex near steady state, which gives robust convergence.
+`FlowSolver` minimizes $J$ using Newton's method on the weak form. The action is convex near steady state, which gives robust convergence.
 
 Thickness is updated separately with `prognostic_solve` / transport stepping.
 
@@ -312,14 +325,14 @@ Thickness is updated separately with `prognostic_solve` / transport stepping.
 
 | icepack quantity | Spin-up NPZ field | Notes |
 |------------------|-------------------|-------|
-| u | `ux`, `uy`, `speed`, `velocity` | Diagnostic SSA solution |
-| h | `thickness` | |
-| s | `surface` | |
-| A | `A`, `A_inv` | Fluidity |
-| C | `cfg_json["C"]` | Sliding coefficient |
-| η (effective viscosity) | `viscosity` | Post-processed diagnostic, not SSA input |
+| $\mathbf{u}$ | `ux`, `uy`, `speed`, `velocity` | Diagnostic SSA solution |
+| $h$ | `thickness` | |
+| $s$ | `surface` | |
+| $A$ | `A`, `A_inv` | Fluidity |
+| $C$ | `cfg_json["C"]` | Sliding coefficient |
+| $\eta$ (effective viscosity) | `viscosity` | Post-processed diagnostic, not SSA input |
 
-The VI workflow treats **η** (or log η) as an inference target; the forward model in spin-up infers it from **u** and **A** via Glen's law after the SSA solve.
+The VI workflow treats $\eta$ (or $\log\eta$) as an inference target; the forward model in spin-up infers it from $\mathbf{u}$ and $A$ via Glen's law after the SSA solve.
 
 ---
 
@@ -352,28 +365,34 @@ The separate [icepack/icepack2](https://github.com/icepack/icepack2) repository 
 
 ## Quick equation summary
 
-**Glen law:**
-\[
-\dot\varepsilon = A|\tau|^{n-1}\tau, \quad n=3
-\]
+**Glen law** ($n=3$):
 
-**Grounded SSA (strong form):**
-\[
-\nabla \cdot (h\sigma) + \rho_I g h \nabla s = C|u|^{1/m-1}u, \quad m=3
-\]
+$$
+\dot{\boldsymbol{\varepsilon}} = A\,|\boldsymbol{\tau}|^{n-1}\,\boldsymbol{\tau}.
+$$
 
-**Floating SSA (strong form):**
-\[
-\nabla \cdot (h\sigma) + \varrho g h \nabla h = 0,
-\quad \varrho = \rho_I(1 - \rho_I/\rho_W)
-\]
+**Grounded SSA (strong form)** ($m=3$):
 
-**Thickness evolution:**
-\[
-\frac{\partial h}{\partial t} + \nabla \cdot (hu) = \dot a_s - \dot a_b
-\]
+$$
+\nabla \cdot (h\boldsymbol{\sigma}) + \rho_I g h \nabla s = C\,|\mathbf{u}|^{1/m-1}\,\mathbf{u}.
+$$
 
-**icepack viscous action:**
-\[
-J_{\text{visc}} = \int_\Omega \frac{2n}{n+1}\, h\, A^{-1/n}\, \dot\varepsilon_e^{\,1/n+1}\, \mathrm{d}x
-\]
+**Floating SSA (strong form)**:
+
+$$
+\nabla \cdot (h\boldsymbol{\sigma}) + \varrho g h \nabla h = \mathbf{0},
+\qquad
+\varrho = \rho_I\left(1 - \frac{\rho_I}{\rho_W}\right).
+$$
+
+**Thickness evolution**:
+
+$$
+\frac{\partial h}{\partial t} + \nabla \cdot (h\mathbf{u}) = \dot a_s - \dot a_b.
+$$
+
+**icepack viscous action**:
+
+$$
+J_{\mathrm{visc}} = \int_\Omega \frac{2n}{n+1}\, h\, A^{-1/n}\, \dot\varepsilon_e^{\,1/n+1}\,\mathrm{d}x.
+$$
