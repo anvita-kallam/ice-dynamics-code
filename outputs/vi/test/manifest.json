@@ -1,0 +1,139 @@
+{
+  "cases": [
+    {
+      "C": 0.001,
+      "C_start": 0.01,
+      "a": 0.3,
+      "case_id": "more_sliding",
+      "fraction_grounded": 0.7577154881909999,
+      "grid_resolution_m": 500.0,
+      "shape_yx": [
+        161,
+        1281
+      ],
+      "sliding_regime": "high",
+      "source_npz": "/Users/anvitakallam/Ice Dynamics/outputs/spinup/test/more_sliding/SteadyState_more_sliding_test_200yr_ramp4000_1refine_grid.npz",
+      "summary": {
+        "log_viscosity_true": {
+          "count": 156272,
+          "max": 5.483515452735065,
+          "mean": 2.7332163982318365,
+          "min": -6.907755278982137,
+          "name": "log_viscosity_true",
+          "std": 0.747190753673054
+        },
+        "speed_obs": {
+          "count": 156272,
+          "max": 291.0557547993756,
+          "mean": 49.04132330171839,
+          "min": 0.0,
+          "name": "speed_obs",
+          "std": 56.112352426152896
+        },
+        "viscosity_true": {
+          "count": 156272,
+          "max": 240.69136093764942,
+          "mean": 18.956329571261556,
+          "min": 0.001,
+          "name": "viscosity_true",
+          "std": 11.560919688000714
+        }
+      },
+      "test_mode": true,
+      "vi_bundle": "/Users/anvitakallam/Ice Dynamics/outputs/vi/test/vi_case_more_sliding.npz"
+    },
+    {
+      "C": 100.0,
+      "C_start": 0.01,
+      "a": 0.3,
+      "case_id": "no_sliding",
+      "fraction_grounded": 0.7099412822862573,
+      "grid_resolution_m": 500.0,
+      "shape_yx": [
+        161,
+        1281
+      ],
+      "sliding_regime": "low",
+      "source_npz": "/Users/anvitakallam/Ice Dynamics/outputs/spinup/test/no_sliding/SteadyState_no_sliding_test_200yr_ramp4000_1refine_grid.npz",
+      "summary": {
+        "log_viscosity_true": {
+          "count": 146419,
+          "max": 8.314929399948275,
+          "mean": 3.374816950210423,
+          "min": -6.907755278982137,
+          "name": "log_viscosity_true",
+          "std": 1.069426271059087
+        },
+        "speed_obs": {
+          "count": 146419,
+          "max": 170.98855487947418,
+          "mean": 16.521129749352152,
+          "min": 0.0,
+          "name": "speed_obs",
+          "std": 31.720292327781703
+        },
+        "viscosity_true": {
+          "count": 146419,
+          "max": 4084.3970684919423,
+          "mean": 60.380245684768646,
+          "min": 0.001,
+          "name": "viscosity_true",
+          "std": 150.54469863888664
+        }
+      },
+      "test_mode": true,
+      "vi_bundle": "/Users/anvitakallam/Ice Dynamics/outputs/vi/test/vi_case_no_sliding.npz"
+    }
+  ],
+  "created_utc": "2026-07-02T14:38:10.697208+00:00",
+  "description": "VI-ready bundles derived from production MISMIP+ spin-up NPZ ground truth. Observations: noisy surface speed (and components). Primary inference target: log_viscosity_true (or viscosity_true).",
+  "fields": {
+    "fixed_geometry": [
+      "bed",
+      "x",
+      "y",
+      "thickness_true",
+      "surface_true"
+    ],
+    "fixed_physics": [
+      "C",
+      "a",
+      "A_true"
+    ],
+    "observations": [
+      "speed_obs",
+      "ux_obs",
+      "uy_obs"
+    ],
+    "truth_targets": [
+      "viscosity_true",
+      "log_viscosity_true"
+    ]
+  },
+  "masks": {
+    "floating_mask": "valid and height_above_flotation <= 0",
+    "grounded_mask": "valid and height_above_flotation > 0",
+    "valid_mask": "finite values for speed, velocity, viscosity, HAF"
+  },
+  "noise": {
+    "model": "Gaussian on speed with sigma = relative_speed_sigma * max(speed, 1e-3)",
+    "relative_speed_sigma": 0.02,
+    "seed": 42
+  },
+  "normalization": {
+    "bed": {
+      "max": 349.83232493477317,
+      "min": -733.11634617052
+    },
+    "log_viscosity_true": {
+      "mean": 3.0435741928810085,
+      "std": 0.9717302236044626
+    },
+    "speed_obs": {
+      "mean": 33.310514590049024,
+      "std": 48.747989053574265
+    }
+  },
+  "output_dir": "/Users/anvitakallam/Ice Dynamics/outputs/vi/test",
+  "version": 1
+}

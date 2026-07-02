@@ -1,0 +1,139 @@
+{
+  "cases": [
+    {
+      "C": 0.001,
+      "C_start": 0.01,
+      "a": 0.3,
+      "case_id": "more_sliding",
+      "fraction_grounded": 0.8710343724089779,
+      "grid_resolution_m": 500.0,
+      "shape_yx": [
+        161,
+        1281
+      ],
+      "sliding_regime": "high",
+      "source_npz": "/Users/anvitakallam/Ice Dynamics/outputs/spinup/production/more_sliding/SteadyState_more_sliding_10500yr_ramp4000_1refine_grid.npz",
+      "summary": {
+        "log_viscosity_true": {
+          "count": 179643,
+          "max": 3.750604291885493,
+          "mean": 2.5853247920124787,
+          "min": 0.714527988632138,
+          "name": "log_viscosity_true",
+          "std": 0.646789427752504
+        },
+        "speed_obs": {
+          "count": 179643,
+          "max": 1046.7315152033993,
+          "mean": 193.43373398585183,
+          "min": 0.0,
+          "name": "speed_obs",
+          "std": 237.2436245367976
+        },
+        "viscosity_true": {
+          "count": 179643,
+          "max": 42.54678491012565,
+          "mean": 16.016123760044476,
+          "min": 2.043222030587686,
+          "name": "viscosity_true",
+          "std": 9.31808365166065
+        }
+      },
+      "test_mode": false,
+      "vi_bundle": "/Users/anvitakallam/Ice Dynamics/outputs/vi/vi_case_more_sliding.npz"
+    },
+    {
+      "C": 100.0,
+      "C_start": 0.01,
+      "a": 0.3,
+      "case_id": "no_sliding",
+      "fraction_grounded": 0.8889503057103098,
+      "grid_resolution_m": 500.0,
+      "shape_yx": [
+        161,
+        1281
+      ],
+      "sliding_regime": "low",
+      "source_npz": "/Users/anvitakallam/Ice Dynamics/outputs/spinup/production/no_sliding/SteadyState_no_sliding_10500yr_ramp4000_1refine_grid.npz",
+      "summary": {
+        "log_viscosity_true": {
+          "count": 183338,
+          "max": 4.1083641192628955,
+          "mean": 3.0679385734552396,
+          "min": -6.907755278982137,
+          "name": "log_viscosity_true",
+          "std": 0.8447223657900494
+        },
+        "speed_obs": {
+          "count": 183338,
+          "max": 1063.986349838103,
+          "mean": 146.1545405634672,
+          "min": 7.184930140001219e-06,
+          "name": "speed_obs",
+          "std": 254.44639805971747
+        },
+        "viscosity_true": {
+          "count": 183338,
+          "max": 60.84709751384162,
+          "mean": 28.271088825155616,
+          "min": 0.001,
+          "name": "viscosity_true",
+          "std": 17.056081853295826
+        }
+      },
+      "test_mode": false,
+      "vi_bundle": "/Users/anvitakallam/Ice Dynamics/outputs/vi/vi_case_no_sliding.npz"
+    }
+  ],
+  "created_utc": "2026-06-30T18:42:35.779097+00:00",
+  "description": "VI-ready bundles derived from production MISMIP+ spin-up NPZ ground truth. Observations: noisy surface speed (and components). Primary inference target: log_viscosity_true (or viscosity_true).",
+  "fields": {
+    "fixed_geometry": [
+      "bed",
+      "x",
+      "y",
+      "thickness_true",
+      "surface_true"
+    ],
+    "fixed_physics": [
+      "C",
+      "a",
+      "A_true"
+    ],
+    "observations": [
+      "speed_obs",
+      "ux_obs",
+      "uy_obs"
+    ],
+    "truth_targets": [
+      "viscosity_true",
+      "log_viscosity_true"
+    ]
+  },
+  "masks": {
+    "floating_mask": "valid and height_above_flotation <= 0",
+    "grounded_mask": "valid and height_above_flotation > 0",
+    "valid_mask": "finite values for speed, velocity, viscosity, HAF"
+  },
+  "noise": {
+    "model": "Gaussian on speed with sigma = relative_speed_sigma * max(speed, 1e-3)",
+    "relative_speed_sigma": 0.02,
+    "seed": 42
+  },
+  "normalization": {
+    "bed": {
+      "max": 349.83232493477317,
+      "min": -733.11634617052
+    },
+    "log_viscosity_true": {
+      "mean": 2.8290880894361807,
+      "std": 0.7909941894994298
+    },
+    "speed_obs": {
+      "mean": 169.55349572634748,
+      "std": 247.21565033452077
+    }
+  },
+  "output_dir": "/Users/anvitakallam/Ice Dynamics/outputs/vi",
+  "version": 1
+}
