@@ -55,6 +55,14 @@ Loads frozen/warm-started `MeanNetwork` from Stage 1, then trains:
 
 Physics approximation is set in config: `train.physics_approximation = 'SSA'` or `'SIA'`.
 
+**SSA physics (CHANGED):** `_physics_nll_ssa` in `models_torch.py` now matches the icepack/spin-up formulation:
+- icepack units (m, yr, MPa)
+- Glen membrane stress `M = 2μ(ε + tr(ε)I)` with `μ = η` (inferred) or `μ_Glen(A, ε)`
+- spin-up plastic basal law with fixed `C` from `cfg_json` (λ GP is not used in SSA residuals)
+- continuity residual optional (`prior.ssa_enforce_continuity`, default `False`)
+
+Sections marked `# CHANGED` in `models_torch.py` and `utilities_torch.py` document every alteration from the original VI SSA.
+
 ```bash
 python train_torch.py run_torch.cfg
 ```
@@ -130,6 +138,25 @@ Scripts expect a config file (e.g. `run_torch.cfg`) parsed by `utilities_torch.p
 | `[torch]` | Device, DDP backend, workers |
 
 Default paths are embedded in `utilities_torch.py` (`DEFAULT_CONFIG`).
+
+**Production more_sliding:** `run_torch.cfg` points at  
+`outputs/spinup/production/more_sliding/SteadyState_more_sliding_10500yr_ramp4000_1refine_grid.npz`  
+and loads `C=0.001`, `A=20` from `cfg_json` automatically.
+
+---
+
+## DSI cluster (Slurm)
+
+See [`slurm/README.md`](slurm/README.md) for batch submission on the UChicago DSI cluster:
+
+```bash
+cd Archive
+mkdir -p logs/slurm
+sbatch slurm/vi_pretrain_more_sliding.sbatch
+sbatch slurm/vi_train_more_sliding.sbatch   # after pretrain
+```
+
+Jobs use `--signal=B:USR1@300 --requeue` and atomic checkpoints for preemption-safe overnight runs.
 
 ---
 

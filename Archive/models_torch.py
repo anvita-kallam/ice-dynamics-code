@@ -47,6 +47,83 @@ def grad(q, z):
                 retain_graph=True
     )[0]
 
+
+# CHANGED: icepack unit system (m, yr, MPa) for SSA physics aligned with spin-up.
+def icepack_ssa_constants(pars, torch_dtype, device):
+    """Return icepack-scaled constants used in IceStream SSA."""
+    year = float(getattr(pars.prior, 'year', 3600 * 24 * 365.25))
+    g = torch.tensor(9.81 * year ** 2, dtype=torch_dtype, device=device)
+    rho_ice = torch.tensor(917.0 / year ** 2 * 1.0e-6, dtype=torch_dtype, device=device)
+    rho_water = torch.tensor(1024.0 / year ** 2 * 1.0e-6, dtype=torch_dtype, device=device)
+    glen_n = float(getattr(pars.prior, 'glen_exponent', 3.0))
+    weertman_m = float(getattr(pars.prior, 'weertman_exponent', 3.0))
+    eps_min = torch.tensor(
+        float(getattr(pars.prior, 'strain_rate_min', 1.0e-5)),
+        dtype=torch_dtype,
+        device=device,
+    )
+    fluidity_A = torch.tensor(
+        float(getattr(pars.prior, 'fluidity_A', 3.985e-13 * year * 1.0e18)),
+        dtype=torch_dtype,
+        device=device,
+    )
+    friction_C = torch.tensor(
+        float(getattr(pars.prior, 'friction_C', 1.0)),
+        dtype=torch_dtype,
+        device=device,
+    )
+    return {
+        'year': year,
+        'g': g,
+        'rho_ice': rho_ice,
+        'rho_water': rho_water,
+        'glen_n': glen_n,
+        'weertman_m': weertman_m,
+        'eps_min': eps_min,
+        'fluidity_A': fluidity_A,
+        'friction_C': friction_C,
+    }
+
+
+# CHANGED: spin-up notebooks use a regularized plastic basal law (not default Weertman).
+def spinup_plastic_basal_drag(u, v, speed, tau_c, friction_C, weertman_m, speed_eps):
+    """
+    Basal drag from the spin-up ``friction`` potential
+    phi = tau_c * ((u_c**(1/m+1) + |u|**(1/m+1))**(m/(m+1)) - u_c),
+    u_c = (tau_c / C)**m.  Returns (tau_bx, tau_by) = d(phi)/d(u).
+    """
+    alpha = 1.0 / weertman_m + 1.0
+    beta = weertman_m / (weertman_m + 1.0)
+    u_c = (tau_c / friction_C).clamp_min(1.0e-30) ** weertman_m
+    u_b = speed.clamp_min(speed_eps)
+    u_hat_x = u / u_b
+    u_hat_y = v / u_b
+    inner_term = u_c ** alpha + u_b ** alpha
+    coeff = tau_c * beta * alpha * inner_term.clamp_min(1.0e-30) ** (beta - 1.0) * u_b ** (alpha - 1.0)
+    return coeff * u_hat_x, coeff * u_hat_y
+
+
+# CHANGED: icepack Glen effective strain rate (viscosity._effective_strain_rate).
+def glen_effective_strain_rate(u_x, u_y, v_x, v_y, eps_min):
+    eps_xx = u_x
+    eps_yy = v_y
+    eps_xy = 0.5 * (u_y + v_x)
+    trace_eps = u_x + v_y
+    return torch.sqrt(
+        0.5 * (
+            eps_xx.square()
+            + eps_yy.square()
+            + 2.0 * eps_xy.square()
+            + trace_eps.square()
+        )
+        + eps_min.square()
+    )
+
+
+# CHANGED: icepack Glen effective viscosity μ = 0.5 A^{-1/n} ε_e^{1/n-1} (MPa·yr).
+def glen_effective_viscosity(eps_eff, fluidity_A, glen_n):
+    return 0.5 * fluidity_A.pow(-1.0 / glen_n) * eps_eff.pow(1.0 / glen_n - 1.0)
+
 class DenseNetwork(nn.Module):
 
     def __init__(self, layer_sizes, dtype=torch.float64):
@@ -536,17 +613,37 @@ class JointModel(nn.Module):
 
         s_x = grad(s, x)
         s_y = grad(s, y)
-        H_x = grad(H, x)
-        H_y = grad(H, y)
         u_x = grad(u, x)
         u_y = grad(u, y)
         v_x = grad(v, x)
         v_y = grad(v, y)
 
-        rho_ice = torch.tensor(917.0, dtype=torch_dtype, device=X.device)
-        gravity = torch.tensor(9.80665, dtype=torch_dtype, device=X.device)
-        tau_dx = -rho_ice * gravity * H * s_x
-        tau_dy = -rho_ice * gravity * H * s_y
+        # CHANGED: icepack constants (m, yr, MPa) instead of SI Pa·m/s².
+        icepack = icepack_ssa_constants(pars, torch_dtype, X.device)
+        rho_ice = icepack['rho_ice']
+        rho_water = icepack['rho_water']
+        gravity = icepack['g']
+        glen_n = icepack['glen_n']
+        weertman_m = icepack['weertman_m']
+        eps_min = icepack['eps_min']
+        fluidity_A = icepack['fluidity_A']
+        friction_C = icepack['friction_C']
+
+        # CHANGED: driving stress matches icepack IceStream.gravity (rho_I * g * h * grad(s)).
+        tau_dx = rho_ice * gravity * H * s_x
+        tau_dy = rho_ice * gravity * H * s_y
+
+        # CHANGED: effective pressure and yield stress for spin-up plastic basal law.
+        water_depth = torch.clamp(-(s - H), min=0.0)
+        p_water = rho_water * gravity * water_depth
+        p_ice = rho_ice * gravity * H
+        effective_pressure = torch.clamp(p_ice - p_water, min=0.0)
+        tau_c = 0.5 * effective_pressure
+
+        # CHANGED: Glen effective strain rate (yr^-1) and viscosity scale (MPa·yr).
+        eps_eff = glen_effective_strain_rate(u_x, u_y, v_x, v_y, eps_min)
+        mu_glen = glen_effective_viscosity(eps_eff, fluidity_A, glen_n)
+        use_inferred_eta = bool(getattr(pars.prior, 'ssa_use_inferred_eta', True))
 
         weighted_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
         sqrt2 = math.sqrt(2.0)
@@ -566,13 +663,16 @@ class JointModel(nn.Module):
             device=X.device,
         )
         speed_eps = torch.tensor(getattr(pars.prior, 'speed_epsilon', 1.0), dtype=torch_dtype, device=X.device)
-        tau_floor = torch.tensor(getattr(pars.prior, 'tau_floor', 1.0), dtype=torch_dtype, device=X.device)
         speed = torch.sqrt(u.square() + v.square() + speed_eps.square())
-        # tau_eff = torch.sqrt(tau_dx.square() + tau_dy.square() + tau_floor.square())
-        tau_eff = torch.sqrt(tau_dx.square() + tau_dy.square())
-        tau_eff = tau_eff.clamp(min=tau_floor)
-        
-        rh = H_x * u + H * u_x + H_y * v + H * v_y
+        enforce_continuity = bool(getattr(pars.prior, 'ssa_enforce_continuity', False))
+
+        # CHANGED: continuity residual optional (off by default for icepack diagnostic SSA).
+        if enforce_continuity:
+            H_x = grad(H, x)
+            H_y = grad(H, y)
+            rh = H_x * u + H * u_x + H_y * v + H * v_y
+        else:
+            rh = None
 
         for i in range(grid.shape[0]):
             theta_eta = sqrt2 * common['eta_scale'] * grid[i] + common['eta_loc']
@@ -584,34 +684,33 @@ class JointModel(nn.Module):
                 self._update_debug_stats(debug_stats, 'eta_log', eta_log)
                 self._update_debug_stats(debug_stats, 'eta', eta)
 
-            membrane_xx = 2.0 * H * eta * (2.0 * u_x + v_y)
-            membrane_xy = H * eta * (u_y + v_x)
-            membrane_yy = 2.0 * H * eta * (u_x + 2.0 * v_y)
+            # CHANGED: Glen membrane stress M = 2 μ (ε + tr(ε) I), μ in MPa·yr.
+            # Default: μ = inferred η (inverse-problem effective viscosity).
+            # Set prior.ssa_use_inferred_eta = False to use forward-model μ_Glen(A, ε).
+            mu = eta if use_inferred_eta else mu_glen
+            membrane_xx = 2.0 * H * mu * (2.0 * u_x + v_y)
+            membrane_xy = H * mu * (u_y + v_x)
+            membrane_yy = 2.0 * H * mu * (u_x + 2.0 * v_y)
             membrane_div_x = grad(membrane_xx, x) + grad(membrane_xy, y)
             membrane_div_y = grad(membrane_xy, x) + grad(membrane_yy, y)
 
-            for j in range(grid.shape[0]):
-                theta_lambda = sqrt2 * common['lambda_scale'] * grid[j] + common['lambda_loc']
-                lambda_logit = common['lambda_logit_center'] + self.lambda_logit_shift + theta_lambda
-                lam = torch.sigmoid(lambda_logit)
-                lam = lam.clamp(min=common['lambda_log_min'], max=common['lambda_log_max'])
-                if return_debug:
-                    self._update_debug_stats(debug_stats, 'lambda_logit', lambda_logit)
-                    self._update_debug_stats(debug_stats, 'lambda', lam)
-
-                basal_drag_x = (1.0 - lam) * tau_eff * u / speed
-                basal_drag_y = (1.0 - lam) * tau_eff * v / speed
-                rux = membrane_div_x + tau_dx - basal_drag_x
-                rvy = membrane_div_y + tau_dy - basal_drag_y
-                if return_debug:
-                    self._update_debug_stats(debug_stats, 'rux', rux)
-                    self._update_debug_stats(debug_stats, 'rvy', rvy)
+            # CHANGED: spin-up plastic basal drag with fixed C (λ GP no longer used in SSA).
+            basal_drag_x, basal_drag_y = spinup_plastic_basal_drag(
+                u, v, speed, tau_c, friction_C, weertman_m, speed_eps
+            )
+            rux = membrane_div_x + tau_dx - basal_drag_x
+            rvy = membrane_div_y + tau_dy - basal_drag_y
+            if return_debug:
+                self._update_debug_stats(debug_stats, 'rux', rux)
+                self._update_debug_stats(debug_stats, 'rvy', rvy)
+                if rh is not None:
                     self._update_debug_stats(debug_stats, 'rh', rh)
 
-                log_prob = normal_log_prob(rux, rx_std).mean()
-                log_prob = log_prob + normal_log_prob(rvy, ry_std).mean()
+            log_prob = normal_log_prob(rux, rx_std).mean()
+            log_prob = log_prob + normal_log_prob(rvy, ry_std).mean()
+            if rh is not None:
                 log_prob = log_prob + normal_log_prob(rh, rh_std).mean()
-                weighted_ll = weighted_ll + weights[i] * weights[j] * log_prob
+            weighted_ll = weighted_ll + weights[i] * log_prob
 
         if return_debug:
             return -weighted_ll, Xn, debug_stats

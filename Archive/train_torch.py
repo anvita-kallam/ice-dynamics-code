@@ -16,10 +16,14 @@ from torch.utils.data.distributed import DistributedSampler
 
 from models_torch import JointModel, MeanNetwork, SparseVariationalGP, create_optimizer
 from utilities_torch import (
+    SlurmPreemptMonitor,
+    apply_slurm_job_restore_flags,
+    atomic_torch_save,
     configure_slurm_ddp_env,
     ParameterClass,
     checkpoint_path,
     create_loader,
+    exit_for_slurm_requeue,
     make_joint_datasets,
     maybe_set_torch_threads,
     move_batch_to_device,
@@ -384,6 +388,9 @@ def log_mean_net_obs_stats(prefix, stats):
 
 
 def main(pars):
+    apply_slurm_job_restore_flags(pars)
+    preempt = SlurmPreemptMonitor()
+    preempt.install()
     physics_approximation = resolve_physics_approximation(pars)
     maybe_set_torch_threads(pars)
     torch_dtype = resolve_torch_dtype(pars.runtime.dtype)
@@ -632,6 +639,24 @@ def main(pars):
             running[2] += losses[2].detach().to(torch.float64)
             running[3] += 1.0
 
+            if preempt.triggered() and rank == 0:
+                atomic_torch_save(
+                    {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'architecture': JOINT_ARCHITECTURE,
+                        'mean_net_outputs': MEAN_NET_OUTPUTS,
+                        'physics_approximation': physics_approximation,
+                        'coordinate_only': True,
+                        'mean_net_first_layer_in_features': first_state_layer(raw_model.mean_net).in_features,
+                        'preempt_checkpoint': True,
+                    },
+                    ckpt_file_old,
+                )
+                print('[slurm] Preemption checkpoint saved. Exiting for requeue.', flush=True)
+                exit_for_slurm_requeue()
+
         train_stats = reduce_mean(running[:3] / torch.clamp(running[3], min=1.0), world_size).tolist()
         if epoch % pars.train.test_every == 0:
             last_test = evaluate(model, obs_test_loader, phys_test_loader, device, torch_dtype, grid, weights, pars, world_size)
@@ -645,7 +670,7 @@ def main(pars):
                 train_stats[0], train_stats[1], train_stats[2], train_total,
                 last_test[0], last_test[1], last_test[2], test_total,)
             logging.info('%s', format_debug_log(epoch, running_debug))
-            torch.save(
+            atomic_torch_save(
                 {
                     'model': (model.module if isinstance(model, DDP) else model).state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -657,7 +682,21 @@ def main(pars):
                     'mean_net_first_layer_in_features': first_state_layer((model.module if isinstance(model, DDP) else model).mean_net).in_features,
                     'kl_note': 'Uses batchwise posterior-vs-prior KL inside JointModel.forward.',
                 },
-                ckpt_file_new
+                ckpt_file_new,
+            )
+            atomic_torch_save(
+                {
+                    'model': (model.module if isinstance(model, DDP) else model).state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'architecture': JOINT_ARCHITECTURE,
+                    'mean_net_outputs': MEAN_NET_OUTPUTS,
+                    'physics_approximation': physics_approximation,
+                    'coordinate_only': True,
+                    'mean_net_first_layer_in_features': first_state_layer((model.module if isinstance(model, DDP) else model).mean_net).in_features,
+                    'kl_note': 'Uses batchwise posterior-vs-prior KL inside JointModel.forward.',
+                },
+                ckpt_file_old,
             )
 
     if distributed:

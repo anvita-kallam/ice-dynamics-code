@@ -19,8 +19,12 @@ from models_torch import MeanNetwork, create_optimizer
 from utilities_torch import (
     configure_slurm_ddp_env,
     ParameterClass,
+    SlurmPreemptMonitor,
+    apply_slurm_job_restore_flags,
+    atomic_torch_save,
     checkpoint_path,
     create_loader,
+    exit_for_slurm_requeue,
     make_pretrain_datasets,
     maybe_set_torch_threads,
     move_batch_to_device,
@@ -279,11 +283,8 @@ def restore_rng_state(checkpoint, device, rank):
 
 def atomic_torch_save(obj, filename):
     """Write checkpoints atomically so a preemption during save does not corrupt the previous checkpoint."""
-    filename = Path(filename)
-    filename.parent.mkdir(parents=True, exist_ok=True)
-    tmp = filename.with_name(filename.name + '.tmp')
-    torch.save(obj, tmp)
-    os.replace(tmp, filename)
+    from utilities_torch import atomic_torch_save as _atomic_torch_save
+    _atomic_torch_save(obj, filename)
 
 
 def resolve_pretrain_restore_file(pars, ckpt_file, last_file, best_file):
@@ -344,6 +345,9 @@ def read_checkpoint_float(checkpoint, key, default=float('nan')):
 
 
 def main(pars):
+    apply_slurm_job_restore_flags(pars)
+    preempt = SlurmPreemptMonitor()
+    preempt.install()
     maybe_set_torch_threads(pars)
     torch_dtype = resolve_torch_dtype(pars.runtime.dtype)
     distributed, rank, local_rank, world_size = init_distributed(pars)
@@ -482,6 +486,30 @@ def main(pars):
             running[0] += loss.detach().to(torch.float64)
             running[1] += 1.0
             running[2:10] += parts.to(torch.float64)
+
+            if preempt.triggered() and rank == 0:
+                raw_model = model.module if isinstance(model, DDP) else model
+                atomic_torch_save(
+                    {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict(),
+                        'rng_state': checkpoint_rng_state(),
+                        'epoch': max(epoch - 1, 0),
+                        'next_epoch': epoch,
+                        'train_loss': float('nan'),
+                        'test_loss': float(last_test),
+                        'best_test_loss': best_test,
+                        'architecture': MEAN_NET_ARCHITECTURE,
+                        'mean_net_outputs': MEAN_NET_OUTPUTS,
+                        'coordinate_only': True,
+                        'mean_net_first_layer_in_features': first_state_layer(raw_model).in_features,
+                        'preempt_checkpoint': True,
+                    },
+                    last_file,
+                )
+                print('[slurm] Preemption checkpoint saved. Exiting for requeue.', flush=True)
+                exit_for_slurm_requeue()
 
         # log different loss components
         train_loss = (running[0] / running[1].clamp_min(1.0)).item()

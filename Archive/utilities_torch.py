@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import ast
 import configparser
+import json
 import os
 import math
 import subprocess
@@ -17,6 +18,64 @@ from torch.utils.data.distributed import DistributedSampler
 from scipy.ndimage import distance_transform_edt
 
 import matplotlib.pyplot as plt
+
+
+def _maybe_save_debug_image(filename, array):
+    """Optional snapshot debug PNGs (set DEBUG_SNAPSHOT_PLOTS=1). Off by default for batch jobs."""
+    if os.environ.get('DEBUG_SNAPSHOT_PLOTS', '').lower() not in ('1', 'true', 'yes'):
+        return
+    Path('logs_debugs').mkdir(parents=True, exist_ok=True)
+    fig = plt.figure()
+    plt.imshow(array)
+    plt.colorbar()
+    plt.savefig(filename)
+    plt.close(fig)
+
+
+def atomic_torch_save(obj, filename):
+    """Write checkpoints atomically (safe for Slurm preemption mid-save)."""
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    tmp = filename.with_name(filename.name + '.tmp')
+    torch.save(obj, tmp)
+    os.replace(tmp, filename)
+
+
+class SlurmPreemptMonitor:
+    """Track SIGUSR1 from Slurm (--signal=B:USR1@300) for graceful checkpoint+requeue."""
+
+    def __init__(self):
+        self.requested = False
+
+    def install(self):
+        import signal
+
+        def _handle(signum, frame):
+            del signum, frame
+            self.requested = True
+            print('[slurm] SIGUSR1 received; will checkpoint at next safe point.', flush=True)
+
+        signal.signal(signal.SIGUSR1, _handle)
+
+    def triggered(self):
+        return self.requested
+
+
+def apply_slurm_job_restore_flags(pars):
+    """After Slurm requeue, resume from the latest checkpoint in cfg paths."""
+    if os.environ.get('SLURM_RESTART_COUNT', '0') == '0':
+        return
+    if hasattr(pars, 'pretrain'):
+        pars.pretrain.restore = True
+    if hasattr(pars, 'train'):
+        pars.train.restore = True
+        pars.train.restore_optimizer = True
+
+
+def exit_for_slurm_requeue():
+    """DSI policy: exit 99 requests automatic job requeue after preemption."""
+    raise SystemExit(99)
+
 @dataclass
 class Snapshot:
     x: np.ndarray
@@ -61,23 +120,38 @@ default_v_err = 25.0
 default_s_err = 5.0
 default_h_err = None
 default_b_err = 5.0
-s2y = 3600*24*365.25
+# CHANGED: seconds per year — icepack uses the same convention (constants.year).
+s2y = 3600 * 24 * 365.25
 
 [prior]
 l_scale_eta = 10.0e3
 std_eta = 2.0
-eta_init = 1.0e6
+# CHANGED: effective viscosity prior in icepack units (MPa·yr), matching spin-up NPZ viscosity.
+eta_init = 1.0
 l_scale_lambda = 10.0e3
 std_lambda = 1.0
 lambda_init = 0.5
 kl = 0.05
 num_inducing_x = 20
 num_inducing_y = 20
-eta_min = 1.0e3
-eta_max = 1.0e10
+eta_min = 1.0e-3
+eta_max = 1.0e6
 thickness_min = 1.0
+# CHANGED: speed regularization in m/yr (icepack velocity units).
 speed_epsilon = 1.0
 tau_floor = 1.0
+# CHANGED: icepack SSA rheology/sliding parameters (see icepack/constants.py).
+year = 3600*24*365.25
+glen_exponent = 3.0
+weertman_exponent = 3.0
+strain_rate_min = 1.0e-5
+# CHANGED: default cold-ice fluidity A and basal friction C (overridden from cfg_json when present).
+fluidity_A = 3.985e-13 * 3600*24*365.25 * 1.0e18
+friction_C = 1.0
+# CHANGED: diagnostic SSA solve does not enforce continuity (icepack IceStream diagnostic).
+ssa_enforce_continuity = False
+# CHANGED: if False, membrane uses μ_Glen(A, ε); if True (default), μ = inferred η.
+ssa_use_inferred_eta = True
 
 [likelihood]
 rx_std = 5.0
@@ -450,30 +524,12 @@ def compute_observed_geometry_fields(snapshot, thickness_min, np_dtype=np.float6
     _, A_x = masked_gradient(A_filled, geom_mask, y_coords, x_coords)
     B_y, _ =masked_gradient(B_filled, geom_mask, y_coords, x_coords)
 
-    fig = plt.figure()
-    plt.imshow(tdx)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_tdx.png')
-    fig = plt.figure()
-    plt.imshow(tdy)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_tdy.png')
-    fig = plt.figure()
-    plt.imshow(A)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_A.png')
-    fig = plt.figure()
-    plt.imshow(B)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_B.png')
-    fig = plt.figure()
-    plt.imshow(A_x)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_A_x.png')
-    fig = plt.figure()
-    plt.imshow(B_y)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_B_y.png')
+    _maybe_save_debug_image('logs_debugs/debug_tdx.png', tdx)
+    _maybe_save_debug_image('logs_debugs/debug_tdy.png', tdy)
+    _maybe_save_debug_image('logs_debugs/debug_A.png', A)
+    _maybe_save_debug_image('logs_debugs/debug_B.png', B)
+    _maybe_save_debug_image('logs_debugs/debug_A_x.png', A_x)
+    _maybe_save_debug_image('logs_debugs/debug_B_y.png', B_y)
     
     names_to_fields = {
         'H_obs': H,
@@ -494,18 +550,37 @@ def compute_observed_geometry_fields(snapshot, thickness_min, np_dtype=np.float6
     }
 
 
+def apply_spinup_cfg_to_pars(pars, cfg):
+    """CHANGED: copy spin-up icepack parameters into the VI prior section."""
+    if cfg is None:
+        return
+    if 'C' in cfg:
+        pars.prior.friction_C = float(cfg['C'])
+    if 'A' in cfg:
+        pars.prior.fluidity_A = float(cfg['A'])
+
+
 def load_snapshot(h5file, pars):
     data = np.load(h5file, allow_pickle=True)
     print(f'reading data file: {h5file}')
-    u = data['ux'] #/ pars.data.s2y # origanl data in m/yr, convert to m/s
-    v = data['uy'] #/ pars.data.s2y # origanl data in m/yr, convert to m/s
-    h = data['h'] if 'h' in data else data['s'] - data['bed']
+    # CHANGED: keep velocity in m/yr to match icepack spin-up NPZ and SSA residuals.
+    u = data['ux']
+    v = data['uy']
+    if 'cfg_json' in data:
+        spinup_cfg = json.loads(str(data['cfg_json']))
+        apply_spinup_cfg_to_pars(pars, spinup_cfg)
+        print(
+            'loaded spin-up cfg_json: '
+            f"C={getattr(pars.prior, 'friction_C', None)}, "
+            f"A={getattr(pars.prior, 'fluidity_A', None)}"
+        )
+    h = data['h'] if 'h' in data else data['thickness'] if 'thickness' in data else data['s'] - data['bed']
     b = data['bed']
-    s = data['s'] if 's' in data else b + h
-    u_err = data['ux_err']
-    v_err = data['uy_err']
-    b_err = data['bed_err']
-    s_err = data['surf_err']
+    s = data['s'] if 's' in data else data['surface'] if 'surface' in data else b + h
+    u_err = data['ux_err'] if 'ux_err' in data else np.full_like(u, pars.data.default_u_err)
+    v_err = data['uy_err'] if 'uy_err' in data else np.full_like(v, pars.data.default_v_err)
+    b_err = data['bed_err'] if 'bed_err' in data else np.full_like(b, pars.data.default_b_err)
+    s_err = data['surf_err'] if 'surf_err' in data else np.full_like(s, pars.data.default_s_err)
     if 'h_err' in data:
         h_err = data['h_err']
     else:
@@ -539,40 +614,15 @@ def load_snapshot(h5file, pars):
     h = np.where(geom_mask, h, np.nan)
     b = np.where(geom_mask, b, np.nan)
 
-    fig = plt.figure()
-    plt.imshow(u)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_u.png')
-    fig = plt.figure()
-    plt.imshow(v)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_v.png')
-    fig = plt.figure()
-    plt.imshow(u_err)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_u_err.png')
-    fig = plt.figure()
-    plt.imshow(v_err)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_v_err.png')
-    fig = plt.figure()
-    plt.imshow(b)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_bed.png')
-    fig = plt.figure()
-    fig = plt.figure()
-    plt.imshow(b_err)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_bed_err.png')
-    fig = plt.figure()
-    plt.imshow(s)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_s.png')
-    fig = plt.figure()
-    plt.imshow(h)
-    plt.colorbar()
-    plt.savefig('logs_debugs/debug_h.png')
-    # exit()
+    _maybe_save_debug_image('logs_debugs/debug_u.png', u)
+    _maybe_save_debug_image('logs_debugs/debug_v.png', v)
+    _maybe_save_debug_image('logs_debugs/debug_u_err.png', u_err)
+    _maybe_save_debug_image('logs_debugs/debug_v_err.png', v_err)
+    _maybe_save_debug_image('logs_debugs/debug_bed.png', b)
+    _maybe_save_debug_image('logs_debugs/debug_bed_err.png', b_err)
+    _maybe_save_debug_image('logs_debugs/debug_s.png', s)
+    _maybe_save_debug_image('logs_debugs/debug_h.png', h)
+
     return Snapshot(
         x=X,
         y=Y,
