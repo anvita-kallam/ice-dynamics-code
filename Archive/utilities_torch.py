@@ -95,6 +95,7 @@ class Snapshot:
     u_fill: np.ndarray
     v_fill: np.ndarray
     shape: tuple
+    viscosity: np.ndarray | None = None
 
 
 default_cfg = """
@@ -132,8 +133,10 @@ l_scale_lambda = 10.0e3
 std_lambda = 1.0
 lambda_init = 0.5
 kl = 0.05
-num_inducing_x = 20
-num_inducing_y = 20
+num_inducing_x = 28
+num_inducing_y = 28
+# 'ice_fps': farthest-point sample on ice mask; 'bbox_grid': uniform bbox mesh.
+inducing_placement = 'ice_fps'
 eta_min = 1.0e-3
 eta_max = 1.0e6
 thickness_min = 1.0
@@ -164,20 +167,33 @@ lr = 0.0002
 mean_net_lr = None
 vgp_eta_lr = None
 vgp_lambda_lr = None
-freeze_mean_net_fraction = 0.1
+# Freeze mean_net for this many epochs counted from start_epoch of THIS run
+# (resume-safe). If None, uses freeze_mean_net_fraction * n_epochs.
+freeze_mean_net_fraction = 0.4
 freeze_mean_net_epochs = None
+freeze_from_run_start = False
 restore = False
 n_epochs = 1000
 batch_size = 2048
 physics_batch_size = 512
-phys_scale = 0.1
+# Explicit ELBO term weights (data / physics / KL / pretrained-state anchor).
+data_scale = 1.0
+phys_scale = 5.0
+state_reg_scale = 1.0
+# Log a warning when unfrozen mean_net grads dominate vgp_eta by more than this factor.
+grad_eta_warn_ratio = 100.0
 meannet_checkdir = 'checkpoints/torch_pretrain'
 checkdir = 'checkpoints/torch_joint'
 logfile = 'log_train_torch'
 optimizer = 'adam'
+# Joint LR schedule: 'none' | 'cosine' | 'plateau'
+lr_scheduler = 'cosine'
+lr_scheduler_factor = 0.1
+lr_scheduler_patience = 50
 quadrature_size = 2
 max_steps_per_epoch = None
 test_every = 1
+eta_eval_every = 10
 grad_clip = None
 restore_optimizer = False
 meannet_checkname = 'model_best'
@@ -603,7 +619,10 @@ def load_snapshot(h5file, pars):
     u, v, s, h, b = u[iy][:, ix], v[iy][:, ix], s[iy][:, ix], h[iy][:, ix], b[iy][:, ix]
     u_err, v_err = u_err[iy][:, ix], v_err[iy][:, ix]
     s_err, h_err, b_err = s_err[iy][:, ix], h_err[iy][:, ix], b_err[iy][:, ix]
-    
+    viscosity = None
+    if 'viscosity' in data:
+        viscosity = np.asarray(data['viscosity'], dtype=float)[iy][:, ix]
+
     geom_mask = np.isfinite(s) & np.isfinite(h) & np.isfinite(b)
     uv_mask = geom_mask & np.isfinite(u) & np.isfinite(v)
 
@@ -644,7 +663,8 @@ def load_snapshot(h5file, pars):
         uv_mask=uv_mask,
         u_fill=u_fill,
         v_fill=v_fill,
-        shape=(H, W)
+        shape=(H, W),
+        viscosity=viscosity,
     )
 
 
