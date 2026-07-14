@@ -160,6 +160,66 @@ Jobs use `--signal=B:USR1@300 --requeue` and atomic checkpoints for preemption-s
 
 ---
 
+## Training plots (PINN + VI)
+
+During **pretrain** and **joint train**, rank 0 writes one CSV row per epoch and refreshes PNG diagnostics every `plot_every` epochs (default `25`; set `0` to disable in-loop plots).
+
+| Stage | Metrics CSV | Figures |
+|-------|-------------|---------|
+| Pretrain | `logs/metrics_pretrain_<logfile>.csv` | `logs/figures/pretrain_<logfile>/` |
+| Joint | `logs/metrics_joint_<logfile>.csv` | `logs/figures/joint_<logfile>/` |
+
+**Pretrain plots:** $\log_{10}$(total & validation loss), data fit, per-field components.
+
+**Joint plots:** $\log_{10}$(total ELBO & validation), data loss, PDE momentum residual, BC/continuity (when `ssa_enforce_continuity=True`).
+
+Regenerate plots anytime (e.g. on the login node while a job runs):
+
+```bash
+cd Archive
+python plot_training.py run_torch.cfg --stage all
+python plot_training.py run_torch.cfg --stage joint
+```
+
+**Jupyter notebook:** [`notebooks/analysis/plot_vi_training.ipynb`](../notebooks/analysis/plot_vi_training.ipynb) — training loss curves.
+
+**Posterior validation:** [`notebooks/analysis/validate_vi_posterior_more_sliding.ipynb`](../notebooks/analysis/validate_vi_posterior_more_sliding.ipynb) — η vs spin-up NPZ, error maps, velocity check.
+
+Optional overrides in `run_torch.cfg`: `plot_every`, `metrics_csv`, `plot_dir` under `[pretrain]` or `[train]`.
+
+---
+
+## η-focused joint training (recommended after biased VI)
+
+The previous more_sliding joint run minimized the ELBO mainly by retuning PINN state \((u,v,s,H)\), leaving η biased (~10× too low, near-zero correlation). Causes:
+
+- mean_net freeze was too short / skipped on resume (absolute epoch check)
+- equal LRs for mean_net and `vgp_eta`
+- soft SSA residual noise (`ssa_*_std=5`) → physics stuck at Gaussian constant floor
+- no anchor to the pretrained PINN state
+- unused λ KL under SSA
+
+`run_torch.cfg` now defaults to an η-first recipe:
+
+| Knob | Recommended | Role |
+|------|-------------|------|
+| `freeze_mean_net_epochs` | 400 | Freeze PINN for first N absolute epochs (resume-safe) |
+| `mean_net_lr` / `vgp_eta_lr` | `1e-5` / `2e-3` | Prefer η updates after unfreeze |
+| `data_scale` / `phys_scale` / `state_reg_scale` | `1` / `5` / `1` | Stronger physics weight + soft state anchor |
+| `ssa_rx_std` / `ssa_ry_std` | `0.05` | Match `|r|~1e-2` so residual term beats NLL floor |
+| `num_inducing_x/y` + `inducing_placement` | `28` / `ice_fps` | Denser ice-masked inducing set (not bbox holes) |
+| `kl_lambda` | `0` | λ unused in SSA |
+| `lr_scheduler` | `cosine` | Avoid plateau |
+| `eta_eval_every` | `10` | Log η RMSE / bias / corr vs spin-up viscosity |
+| `grad_eta_warn_ratio` | `100` | Warn if unfrozen mean_net grads drown `vgp_eta` |
+| `restore` | `False` | Fresh joint train from Stage-1 pretrain |
+
+**Important:** previous epochs showed `phys≈1.84` flat while `|r_ux|,|r_vy|~1e-2` — with `ssa_*_std=1`, that is the Gaussian constant floor, so η never sees a useful physics gradient. Tightening `ssa_*_std` to `0.05` and raising `phys_scale` to `5` is meant to fix that. Changing inducing size/placement changes VGP parameter shapes → start fresh (`restore=False`), do not resume the 400-inducing checkpoint.
+
+Logs now include per-epoch: data / phys / KL / state_reg / total (train+test), module grad norms (`vgp_over_mean` ratio, `eta_log_shift`), LRs, and `eta_vs_ref` metrics when viscosity is present in the NPZ.
+
+---
+
 ## Relation to this repository
 
 | Component | Location |
