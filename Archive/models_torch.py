@@ -221,6 +221,55 @@ class MeanNetwork(nn.Module):
         return unpack_variables(params)
 
 
+def build_inducing_points_physical(x, y, num_inducing_x, num_inducing_y, placement='ice_fps'):
+    """
+    Build inducing locations in physical (x, y) coordinates.
+
+    placement:
+      - 'bbox_grid': uniform mesh over the bounding box (may place points off-ice)
+      - 'ice_fps': farthest-point sample on the provided ice coordinates (default)
+    """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    y = np.asarray(y, dtype=np.float64).ravel()
+    if x.size == 0 or y.size == 0:
+        raise ValueError('Cannot build inducing points from empty ice coordinates')
+    n_target = int(num_inducing_x) * int(num_inducing_y)
+    if n_target <= 0:
+        raise ValueError(f'Need positive inducing count, got {num_inducing_x} x {num_inducing_y}')
+
+    placement = str(placement or 'ice_fps').lower()
+    if placement == 'bbox_grid':
+        x_ind = np.linspace(x.min(), x.max(), int(num_inducing_x))
+        y_ind = np.linspace(y.min(), y.max(), int(num_inducing_y))
+        x_ind, y_ind = [arr.ravel() for arr in np.meshgrid(x_ind, y_ind)]
+        return np.column_stack((x_ind, y_ind))
+
+    if placement not in ('ice_fps', 'fps', 'ice'):
+        raise ValueError(
+            f"Unknown inducing_placement={placement!r}; use 'ice_fps' or 'bbox_grid'")
+
+    xy = np.column_stack((x, y))
+    # Subsample dense ice clouds before FPS for O(N * M) cost control.
+    max_candidates = max(n_target * 40, 8000)
+    if xy.shape[0] > max_candidates:
+        rng = np.random.default_rng(0)
+        choose = rng.choice(xy.shape[0], size=max_candidates, replace=False)
+        xy = xy[choose]
+
+    n = xy.shape[0]
+    m = min(n_target, n)
+    # Seed near the ice centroid so the first points cover the main mass.
+    seed = int(np.argmin(np.sum((xy - xy.mean(axis=0)) ** 2, axis=1)))
+    selected = [seed]
+    dists = np.full(n, np.inf, dtype=np.float64)
+    for _ in range(1, m):
+        last = xy[selected[-1]]
+        d = np.sqrt(np.sum((xy - last) ** 2, axis=1))
+        dists = np.minimum(dists, d)
+        selected.append(int(np.argmax(dists)))
+    return xy[np.asarray(selected, dtype=np.int64)]
+
+
 class SparseVariationalGP(nn.Module):
     """
     Minimal sparse variational GP for the 2D latent fields used in joint training.
@@ -232,12 +281,11 @@ class SparseVariationalGP(nn.Module):
     def __init__(self, x, y, num_inducing_x, num_inducing_y, norms,
                  trainable_obs_variance=False, amplitude_init=0.2,
                  length_scale_init=0.3, noise_variance_init=1.0e-4,
-                 jitter=1.0e-5, dtype=torch.float64):
+                 jitter=1.0e-5, dtype=torch.float64, inducing_placement='ice_fps'):
         super().__init__()
-        x_ind = np.linspace(x.min(), x.max(), num_inducing_x)
-        y_ind = np.linspace(y.min(), y.max(), num_inducing_y)
-        x_ind, y_ind = [arr.ravel() for arr in np.meshgrid(x_ind, y_ind)]
-        X_ind = np.column_stack((norms['x'](x_ind), norms['y'](y_ind)))
+        X_phys = build_inducing_points_physical(
+            x, y, num_inducing_x, num_inducing_y, placement=inducing_placement)
+        X_ind = np.column_stack((norms['x'](X_phys[:, 0]), norms['y'](X_phys[:, 1])))
         num_inducing = X_ind.shape[0]
 
         self.register_buffer('inducing_index_points', torch.tensor(X_ind, dtype=dtype))
@@ -250,6 +298,7 @@ class SparseVariationalGP(nn.Module):
         self.variational_inducing_loc = nn.Parameter(torch.zeros(num_inducing, dtype=dtype))
         self.raw_variational_inducing_scale = nn.Parameter(torch.eye(num_inducing, dtype=dtype))
         self.jitter = jitter
+        self.inducing_placement = str(inducing_placement)
 
     @property
     def amplitude(self):
@@ -394,11 +443,17 @@ class SparseVariationalGP(nn.Module):
             
 class JointModel(nn.Module):
 
-    def __init__(self, mean_net, vgp_eta, vgp_lambda, dtype=None):
+    def __init__(self, mean_net, vgp_eta, vgp_lambda, dtype=None, mean_net_ref=None):
         super().__init__()
         self.mean_net = mean_net
         self.vgp_eta = vgp_eta
         self.vgp_lambda = vgp_lambda
+        # Frozen pretrained MeanNetwork used as a soft state anchor (not a submodule).
+        self.mean_net_ref = mean_net_ref
+        if self.mean_net_ref is not None:
+            self.mean_net_ref.eval()
+            for param in self.mean_net_ref.parameters():
+                param.requires_grad_(False)
         if dtype is None:
             dtype = next(mean_net.parameters()).dtype
 
@@ -546,6 +601,8 @@ class JointModel(nn.Module):
         B_y = grad(B, y)
 
         weighted_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
+        momentum_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
+        continuity_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
         sqrt2 = math.sqrt(2.0)
         rx_std = torch.tensor(pars.likelihood.rx_std, dtype=torch_dtype, device=X.device)
         ry_std = torch.tensor(pars.likelihood.ry_std, dtype=torch_dtype, device=X.device)
@@ -592,10 +649,16 @@ class JointModel(nn.Module):
 
                 log_prob = normal_log_prob(rux, rx_std).mean()
                 log_prob = log_prob + normal_log_prob(rvy, ry_std).mean()
-                log_prob = log_prob + normal_log_prob(rh, rh_std).mean()
-                weighted_ll = weighted_ll + weights[i] * weights[j] * log_prob
+                momentum_ll = momentum_ll + weights[i] * weights[j] * log_prob
+                cont_prob = normal_log_prob(rh, rh_std).mean()
+                continuity_ll = continuity_ll + weights[i] * weights[j] * cont_prob
+                weighted_ll = weighted_ll + weights[i] * weights[j] * (log_prob + cont_prob)
 
         if return_debug:
+            debug_stats['loss_components'] = {
+                'momentum_nll': float((-momentum_ll).detach().item()),
+                'continuity_nll': float((-continuity_ll).detach().item()),
+            }
             return -weighted_ll, Xn, debug_stats
         return -weighted_ll, Xn
 
@@ -646,6 +709,8 @@ class JointModel(nn.Module):
         use_inferred_eta = bool(getattr(pars.prior, 'ssa_use_inferred_eta', True))
 
         weighted_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
+        momentum_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
+        continuity_ll = torch.zeros((), dtype=torch_dtype, device=X.device)
         sqrt2 = math.sqrt(2.0)
         rx_std = torch.tensor(
             getattr(pars.likelihood, 'ssa_rx_std', pars.likelihood.rx_std),
@@ -708,11 +773,18 @@ class JointModel(nn.Module):
 
             log_prob = normal_log_prob(rux, rx_std).mean()
             log_prob = log_prob + normal_log_prob(rvy, ry_std).mean()
-            if rh is not None:
-                log_prob = log_prob + normal_log_prob(rh, rh_std).mean()
+            momentum_ll = momentum_ll + weights[i] * log_prob
             weighted_ll = weighted_ll + weights[i] * log_prob
+            if rh is not None:
+                cont_prob = normal_log_prob(rh, rh_std).mean()
+                continuity_ll = continuity_ll + weights[i] * cont_prob
+                weighted_ll = weighted_ll + weights[i] * cont_prob
 
         if return_debug:
+            debug_stats['loss_components'] = {
+                'momentum_nll': float((-momentum_ll).detach().item()),
+                'continuity_nll': float((-continuity_ll).detach().item()) if enforce_continuity else float('nan'),
+            }
             return -weighted_ll, Xn, debug_stats
         return -weighted_ll, Xn
 
@@ -751,6 +823,24 @@ class JointModel(nn.Module):
         h_term = (hp - batch_obs['h']).square() / batch_obs['h_err'].square()
         obs_weight = 2.0 * batch_obs['uv_mask'].sum() + 2.0 * batch_obs['geom_mask'].sum()
         data_nll = (u_term + v_term + s_term + h_term).sum() / torch.clamp(obs_weight, min=1.0)
+
+        # Soft anchor toward the pretrained PINN state. Penalizes drift in
+        # (u,v,s,H) so PDE residuals must be explained by η rather than by
+        # freely retuning the mean field.
+        state_reg = torch.zeros((), dtype=torch_dtype, device=batch_obs['x'].device)
+        state_reg_scale = float(getattr(pars.train, 'state_reg_scale', 0.0) or 0.0)
+        if self.mean_net_ref is not None and state_reg_scale > 0.0:
+            with torch.no_grad():
+                ur, vr, sr, hr = self.mean_net_ref(
+                    batch_obs['x'], batch_obs['y'],
+                    batch_obs['u_in'], batch_obs['v_in'], batch_obs['s_in'], batch_obs['b_in'],
+                    batch_obs['uv_mask'],
+                    inverse_norm=False)
+            state_u = batch_obs['uv_mask'] * (up - ur).square()
+            state_v = batch_obs['uv_mask'] * (vp - vr).square()
+            state_s = (sp - sr).square()
+            state_h = (hp - hr).square()
+            state_reg = (state_u + state_v + state_s + state_h).sum() / torch.clamp(obs_weight, min=1.0)
 
         physics_out = self._physics_nll(
             batch_phys, grid, weights, pars, torch_dtype, return_debug=return_debug
@@ -797,8 +887,32 @@ class JointModel(nn.Module):
         kl_lambda_scale = torch.tensor(pars.prior.kl_lambda, dtype=torch_dtype, device=batch_phys['x'].device) / batch_n.clamp(min=1.0)    
         kl_value = kl_eta_scale * kl_eta + kl_lambda_scale * kl_lambda
 
-        phys_scale = torch.tensor(pars.train.phys_scale, dtype=torch_dtype, device=batch_phys['x'].device)
-        outputs = (data_nll, phys_scale * physics_nll, kl_value)
+        data_scale = torch.tensor(
+            float(getattr(pars.train, 'data_scale', 1.0) or 1.0),
+            dtype=torch_dtype,
+            device=batch_phys['x'].device,
+        )
+        phys_scale = torch.tensor(
+            float(getattr(pars.train, 'phys_scale', 1.0) or 1.0),
+            dtype=torch_dtype,
+            device=batch_phys['x'].device,
+        )
+        state_reg_scale_t = torch.tensor(
+            state_reg_scale, dtype=torch_dtype, device=batch_phys['x'].device)
+        if return_debug and isinstance(debug_stats, dict) and 'loss_components' in debug_stats:
+            scale = float(phys_scale.item())
+            debug_stats['loss_components'] = {
+                key: float('nan') if not math.isfinite(value) else scale * float(value)
+                for key, value in debug_stats['loss_components'].items()
+            }
+            debug_stats['loss_components']['state_reg'] = float(
+                (state_reg_scale_t * state_reg).detach().item())
+        outputs = (
+            data_scale * data_nll,
+            phys_scale * physics_nll,
+            kl_value,
+            state_reg_scale_t * state_reg,
+        )
         if return_debug:
             return outputs + (debug_stats,)
         return outputs
