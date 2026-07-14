@@ -133,20 +133,23 @@ def main(pars, num_samples=None):
     eta_length_scale = normalized_length_scale(pars.prior.l_scale_eta, norms)
     lambda_length_scale = normalized_length_scale(pars.prior.l_scale_lambda, norms)
 
+    inducing_placement = getattr(pars.prior, 'inducing_placement', 'ice_fps')
     vgp_eta = SparseVariationalGP(
         x_ref, y_ref,
         pars.prior.num_inducing_x, pars.prior.num_inducing_y, norms,
         trainable_obs_variance=pars.likelihood.trainable_obs_variance,
         amplitude_init=pars.prior.std_eta,
         length_scale_init=eta_length_scale,
-        dtype=torch_dtype)
+        dtype=torch_dtype,
+        inducing_placement=inducing_placement)
     vgp_lambda = SparseVariationalGP(
         x_ref, y_ref,
         pars.prior.num_inducing_x, pars.prior.num_inducing_y, norms,
         trainable_obs_variance=pars.likelihood.trainable_obs_variance,
         amplitude_init=pars.prior.std_lambda,
         length_scale_init=lambda_length_scale,
-        dtype=torch_dtype)
+        dtype=torch_dtype,
+        inducing_placement=inducing_placement)
     #---- load checkpoints -----#
     # The no-reference model has two trainable scalar offsets in JointModel,
     # so load the full JointModel state rather than only the three submodules.
