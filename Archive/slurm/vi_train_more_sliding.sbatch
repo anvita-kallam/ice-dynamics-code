@@ -4,13 +4,16 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --requeue
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --error=logs/slurm/%x_%j.err
 
 # Stage 2 — VI joint training (requires Stage 1 checkpoint model_best).
+# Wall time: 12h max on DSI general (24h is rejected). Preemption / wall-clock
+# end → USR1 → checkpoint + exit 99 → Slurm requeues; restore is automatic.
+# Chain multiple 12h allocations until n_epochs=1000 finishes (~24h total).
 #
 # Submit after pretrain completes:
 #   cd /path/to/ice-dynamics/Archive
