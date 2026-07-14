@@ -16,6 +16,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 from models_torch import MeanNetwork, create_optimizer
+from training_metrics import (
+    EpochMetricsWriter,
+    PRETRAIN_FIELDS,
+    maybe_plot_training,
+    resolve_metrics_csv,
+    resolve_plot_dir,
+    resolve_plot_every,
+)
 from utilities_torch import (
     configure_slurm_ddp_env,
     ParameterClass,
@@ -464,6 +472,14 @@ def main(pars):
                 rng_restored,
             )
 
+    metrics_csv = resolve_metrics_csv(pars.pretrain, pars.pretrain.logfile, 'pretrain')
+    plot_dir = resolve_plot_dir(pars.pretrain, pars.pretrain.logfile, 'pretrain')
+    plot_every = resolve_plot_every(pars.pretrain)
+    metrics_writer = None
+    if rank == 0:
+        metrics_writer = EpochMetricsWriter(
+            metrics_csv, PRETRAIN_FIELDS, append=bool(getattr(pars.pretrain, 'restore', False)))
+
     for epoch in range(start_epoch, stop_epoch):
         model.train()
         if distributed and isinstance(train_loader.sampler, DistributedSampler):
@@ -480,7 +496,11 @@ def main(pars):
             loss.backward()
             grad_norm = float('nan')
             if pars.pretrain.grad_clip is not None:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), pars.pretrain.grad_clip)
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), pars.pretrain.grad_clip))
+            else:
+                params = [p for p in model.parameters() if p.grad is not None]
+                if params:
+                    grad_norm = float(torch.nn.utils.clip_grad_norm_(params, float('inf')))
             optimizer.step()
             # log different loss components
             running[0] += loss.detach().to(torch.float64)
@@ -551,11 +571,32 @@ def main(pars):
             logging.info(
                 '%d %.10f %.10f %.6e %.6e %.6e %.6e %.2f',
                 epoch, train_loss, last_test, u_loss, v_loss, s_loss, h_loss, grad_norm)
+            if metrics_writer is not None:
+                metrics_writer.write_row(
+                    {
+                        'epoch': epoch,
+                        'train_loss': train_loss,
+                        'test_loss': last_test,
+                        'u_loss': u_loss,
+                        'v_loss': v_loss,
+                        's_loss': s_loss,
+                        'h_loss': h_loss,
+                        'grad_norm': grad_norm,
+                    }
+                )
+                maybe_plot_training(
+                    'pretrain', metrics_csv, plot_dir, epoch, plot_every, pars.pretrain.logfile)
             atomic_torch_save(state, last_file)
             if evaluated and last_test <= best_test:
                 atomic_torch_save(state, best_file)
 
         
+    if rank == 0 and metrics_writer is not None:
+        final_epoch = max(stop_epoch - 1, 0)
+        maybe_plot_training(
+            'pretrain', metrics_csv, plot_dir, final_epoch, max(plot_every, 1), pars.pretrain.logfile)
+        metrics_writer.close()
+
     if distributed:
         dist.barrier()
         dist.destroy_process_group()

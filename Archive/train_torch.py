@@ -15,6 +15,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 from models_torch import JointModel, MeanNetwork, SparseVariationalGP, create_optimizer
+from training_metrics import (
+    EpochMetricsWriter,
+    JOINT_FIELDS,
+    maybe_plot_training,
+    resolve_metrics_csv,
+    resolve_plot_dir,
+    resolve_plot_every,
+    summarize_debug_running,
+)
 from utilities_torch import (
     SlurmPreemptMonitor,
     apply_slurm_job_restore_flags,
@@ -86,9 +95,10 @@ def choose_device(pars, local_rank):
     return torch.device('cpu')
 
 
-def setup_logging(logfile, rank):
+def setup_logging(logfile, rank, append=False):
     if rank == 0:
-        logging.basicConfig(filename=logfile, filemode='w', level=logging.INFO)
+        filemode = 'a' if append else 'w'
+        logging.basicConfig(filename=logfile, filemode=filemode, level=logging.INFO)
 
 
 def reduce_mean(value, world_size):
@@ -115,16 +125,28 @@ def module_grad_norm(module):
 def init_debug_running():
     names = ('eta_log', 'theta_eta', 'eta', 'lambda_logit', 'lambda', 'rux', 'rvy', 'rh')
     return {
-        'grad_norm_sum': {'mean_net': 0.0, 'vgp_eta': 0.0, 'vgp_lambda': 0.0},
+        'grad_norm_sum': {
+            'mean_net': 0.0, 'vgp_eta': 0.0, 'vgp_lambda': 0.0, 'eta_log_shift': 0.0,
+        },
         'field_minmax': {name: {'min': float('inf'), 'max': float('-inf')} for name in names},
+        'loss_component_sum': {'momentum_nll': 0.0, 'continuity_nll': 0.0, 'state_reg': 0.0},
+        'loss_component_count': {'momentum_nll': 0, 'continuity_nll': 0, 'state_reg': 0},
         'count': 0,
     }
 
 def update_debug_running(running_debug, step_debug, grad_norms):
     running_debug['count'] += 1
     for name, value in grad_norms.items():
+        if name not in running_debug['grad_norm_sum']:
+            running_debug['grad_norm_sum'][name] = 0.0
         running_debug['grad_norm_sum'][name] += float(value)
     for field_name, field_stats in step_debug.items():
+        if field_name == 'loss_components':
+            for component_name, component_value in field_stats.items():
+                if component_name in running_debug['loss_component_sum'] and math.isfinite(float(component_value)):
+                    running_debug['loss_component_sum'][component_name] += float(component_value)
+                    running_debug['loss_component_count'][component_name] += 1
+            continue
         running_field = running_debug['field_minmax'][field_name]
         running_field['min'] = min(running_field['min'], float(field_stats['min']))
         running_field['max'] = max(running_field['max'], float(field_stats['max']))
@@ -132,9 +154,19 @@ def update_debug_running(running_debug, step_debug, grad_norms):
 
 def format_debug_log(epoch, running_debug):
     count = max(running_debug['count'], 1)
-    grad_part = ' '.join(
-        f'{name}={running_debug["grad_norm_sum"][name] / count:.6e}'
-        for name in ('mean_net', 'vgp_eta', 'vgp_lambda'))
+    grad_avgs = {
+        name: running_debug['grad_norm_sum'].get(name, 0.0) / count
+        for name in ('mean_net', 'vgp_eta', 'vgp_lambda', 'eta_log_shift')
+    }
+    # After unfreeze, mean_net grads should not drown vgp_eta (~ratio < grad_eta_warn_ratio).
+    mean_grad = grad_avgs['mean_net']
+    eta_grad = grad_avgs['vgp_eta']
+    if mean_grad > 0.0:
+        grad_ratio = eta_grad / mean_grad
+    else:
+        grad_ratio = float('inf') if eta_grad > 0.0 else float('nan')
+    grad_part = ' '.join(f'{name}={grad_avgs[name]:.6e}' for name in grad_avgs)
+    grad_part = f'{grad_part} vgp_over_mean={grad_ratio:.3e}'
     field_parts = []
     for field_name in ('eta_log', 'theta_eta', 'eta', 'lambda_logit', 'lambda', 'rux', 'rvy', 'rh'):
         stats = running_debug['field_minmax'][field_name]
@@ -142,24 +174,54 @@ def format_debug_log(epoch, running_debug):
     return f'debug {epoch} grad_norms {grad_part} ' + ' '.join(field_parts)
 
 
+def maybe_warn_weak_eta_grads(epoch, running_debug, mean_net_frozen, warn_ratio):
+    """Return a warning string when unfrozen mean_net grads dominate vgp_eta."""
+    if mean_net_frozen or warn_ratio is None:
+        return None
+    count = max(running_debug['count'], 1)
+    mean_grad = running_debug['grad_norm_sum'].get('mean_net', 0.0) / count
+    eta_grad = running_debug['grad_norm_sum'].get('vgp_eta', 0.0) / count
+    if not math.isfinite(mean_grad) or not math.isfinite(eta_grad):
+        return None
+    if eta_grad <= 0.0:
+        return (
+            f'epoch {epoch} WARNING: vgp_eta grad norm is {eta_grad:.3e} while mean_net '
+            f'is unfrozen (mean_net={mean_grad:.3e})'
+        )
+    ratio = mean_grad / eta_grad
+    if ratio > float(warn_ratio):
+        return (
+            f'epoch {epoch} WARNING: mean_net grad dominates vgp_eta by {ratio:.1f}x '
+            f'(mean_net={mean_grad:.3e}, vgp_eta={eta_grad:.3e}, threshold={warn_ratio:g})'
+        )
+    return None
+
+
 def evaluate(model, obs_loader, phys_loader, device, torch_dtype, grid, weights, pars, world_size):
     model.eval()
     obs_iter = iter(obs_loader)
     phys_iter = iter(phys_loader)
     n_eval = min(len(obs_loader), len(phys_loader))
-    totals = torch.zeros(4, dtype=torch.float64, device=device)
+    totals = torch.zeros(8, dtype=torch.float64, device=device)
     for _ in range(n_eval):
         batch_obs = move_batch_to_device(next(obs_iter), device, torch_dtype)
         batch_phys = move_batch_to_device(next(phys_iter), device, torch_dtype)
-        losses = joint_loss(model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size)
+        losses = joint_loss(
+            model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size, return_debug=True)
         totals[0] += losses[0].detach().to(torch.float64)
         totals[1] += losses[1].detach().to(torch.float64)
         totals[2] += losses[2].detach().to(torch.float64)
-        totals[3] += 1.0
+        totals[3] += losses[3].detach().to(torch.float64)
+        components = losses[4].get('loss_components', {}) if isinstance(losses[4], dict) else {}
+        if components:
+            totals[4] += float(components.get('momentum_nll', float('nan')))
+            totals[5] += float(components.get('continuity_nll', float('nan')))
+        totals[6] += 1.0
     if world_size > 1:
         dist.all_reduce(totals, op=dist.ReduceOp.SUM)
-    count = max(totals[3].item(), 1.0)
-    return (totals[:3] / count).tolist()
+    count = max(totals[6].item(), 1.0)
+    # data, phys, kl, state_reg, pde, bc
+    return (totals[:6] / count).tolist()
 
 
 def next_or_restart(iterator, loader):
@@ -180,11 +242,85 @@ def resolve_joint_group_lrs(pars):
 
 
 def resolve_mean_net_freeze_epochs(pars):
+    """Number of absolute epochs to keep mean_net frozen (epoch < this value)."""
     if pars.train.freeze_mean_net_epochs is not None:
         freeze_epochs = int(pars.train.freeze_mean_net_epochs)
     else:
         freeze_epochs = int(math.ceil(pars.train.n_epochs * pars.train.freeze_mean_net_fraction))
-    return min(max(freeze_epochs, 0), int(pars.train.n_epochs))
+    return max(freeze_epochs, 0)
+
+
+def resolve_mean_net_freeze_until(pars, start_epoch):
+    """Absolute epoch index (exclusive) until which mean_net stays frozen.
+
+    Default is absolute (epoch < freeze_mean_net_epochs) so Slurm requeue mid-freeze
+    continues freezing until the intended global epoch. Set
+    train.freeze_from_run_start=True to count freeze epochs from start_epoch instead
+    (useful when resuming an old joint checkpoint and wanting a new η-only phase).
+    """
+    n_freeze = resolve_mean_net_freeze_epochs(pars)
+    if bool(getattr(pars.train, 'freeze_from_run_start', False)):
+        return int(start_epoch) + n_freeze
+    return n_freeze
+
+
+def build_joint_scheduler(optimizer, pars, n_epochs_this_run):
+    kind = str(getattr(pars.train, 'lr_scheduler', 'none') or 'none').strip().lower()
+    if kind in ('', 'none', 'null', 'false'):
+        return None, kind
+    if kind == 'cosine':
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(int(n_epochs_this_run), 1),
+            eta_min=float(getattr(pars.train, 'lr_scheduler_eta_min', 0.0) or 0.0),
+        ), kind
+    if kind == 'plateau':
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=float(getattr(pars.train, 'lr_scheduler_factor', 0.1) or 0.1),
+            patience=int(getattr(pars.train, 'lr_scheduler_patience', 50) or 50),
+        ), kind
+    raise ValueError(f"Unsupported train.lr_scheduler={kind!r}. Use 'none', 'cosine', or 'plateau'.")
+
+
+def evaluate_eta_vs_reference(model, snapshot, device, torch_dtype, pars, max_points=8192):
+    """Compare GP posterior mean η to spin-up viscosity on a grounded subsample."""
+    if snapshot.viscosity is None:
+        return None
+    raw = model.module if isinstance(model, DDP) else model
+    geom = snapshot.geom_mask & np.isfinite(snapshot.viscosity) & (snapshot.viscosity > 0)
+    ys, xs = np.where(geom)
+    if ys.size == 0:
+        return None
+    if ys.size > max_points:
+        rng = np.random.default_rng(0)
+        pick = rng.choice(ys.size, size=max_points, replace=False)
+        ys, xs = ys[pick], xs[pick]
+    x = torch.as_tensor(snapshot.x[ys, xs], dtype=torch_dtype, device=device).reshape(-1, 1)
+    y = torch.as_tensor(snapshot.y[ys, xs], dtype=torch_dtype, device=device).reshape(-1, 1)
+    X = torch.cat([x, y], dim=1)
+    from models_torch import normalize_tensor
+    Xn = normalize_tensor(X, raw.mean_net.iW_coord, raw.mean_net.b_coord)
+    with torch.no_grad():
+        theta = raw.vgp_eta.mean(Xn).detach().cpu().numpy().reshape(-1)
+    eta_init = float(getattr(pars.prior, 'eta_init', 12.0))
+    eta_log_center = math.log(max(eta_init, 1.0e-12))
+    eta_log_shift = float(raw.eta_log_shift.detach().cpu().item())
+    eta_log_min = math.log(float(pars.prior.eta_min))
+    eta_log_max = math.log(float(pars.prior.eta_max))
+    eta_log = np.clip(eta_log_center + eta_log_shift + theta, eta_log_min, eta_log_max)
+    eta_pred = np.exp(eta_log)
+    eta_ref = snapshot.viscosity[ys, xs].astype(float)
+    log_err = np.log10(eta_pred) - np.log10(eta_ref)
+    return {
+        'log10_eta_rmse': float(np.sqrt(np.mean(log_err ** 2))),
+        'log10_eta_bias': float(np.mean(log_err)),
+        'log10_eta_r': float(np.corrcoef(np.log10(eta_pred), np.log10(eta_ref))[0, 1]),
+        'rel_eta_rmse': float(np.sqrt(np.mean(((eta_pred - eta_ref) / eta_ref) ** 2))),
+        'eta_pred_mean': float(np.mean(eta_pred)),
+        'eta_ref_mean': float(np.mean(eta_ref)),
+        'n_points': int(eta_pred.size),
+    }
 
 
 def normalized_length_scale(length_m, norms):
@@ -396,7 +532,7 @@ def main(pars):
     torch_dtype = resolve_torch_dtype(pars.runtime.dtype)
     distributed, rank, local_rank, world_size = init_distributed(pars)
     device = choose_device(pars, local_rank)
-    setup_logging(pars.train.logfile, rank)
+    setup_logging(pars.train.logfile, rank, append=bool(getattr(pars.train, 'restore', False)))
     if rank == 0:
         logging.info(pprint.pformat(to_dict(pars), indent=2))
         logging.info('using %s physics approximation for PINN loss', physics_approximation)
@@ -428,20 +564,23 @@ def main(pars):
     eta_length_scale = normalized_length_scale(pars.prior.l_scale_eta, norms)
     lambda_length_scale = normalized_length_scale(pars.prior.l_scale_lambda, norms)
 
+    inducing_placement = getattr(pars.prior, 'inducing_placement', 'ice_fps')
     vgp_eta = SparseVariationalGP(
         x_ref, y_ref,
         pars.prior.num_inducing_x, pars.prior.num_inducing_y, norms,
         trainable_obs_variance=pars.likelihood.trainable_obs_variance,
         amplitude_init=pars.prior.std_eta,
         length_scale_init=eta_length_scale,
-        dtype=torch_dtype)
+        dtype=torch_dtype,
+        inducing_placement=inducing_placement)
     vgp_lambda = SparseVariationalGP(
         x_ref, y_ref,
         pars.prior.num_inducing_x, pars.prior.num_inducing_y, norms,
         trainable_obs_variance=pars.likelihood.trainable_obs_variance,
         amplitude_init=pars.prior.std_lambda,
         length_scale_init=lambda_length_scale,
-        dtype=torch_dtype)
+        dtype=torch_dtype,
+        inducing_placement=inducing_placement)
     model = JointModel(mean_net, vgp_eta, vgp_lambda, dtype=torch_dtype).to(device)
     assert_coordinate_only_mean_net(model.mean_net)
     if not pars.train.restore:
@@ -452,6 +591,14 @@ def main(pars):
         logging.info(
             'MeanNetwork architecture: coordinate-only state_net(x, y) -> u, v, s, H; bed is derived as b=s-H; first layer in_features=%d',
             first_state_layer(model.mean_net).in_features,
+        )
+        logging.info(
+            'VGP inducing: placement=%s requested=%dx%d actual_eta=%d actual_lambda=%d',
+            inducing_placement,
+            int(pars.prior.num_inducing_x),
+            int(pars.prior.num_inducing_y),
+            int(model.vgp_eta.inducing_index_points.shape[0]),
+            int(model.vgp_lambda.inducing_index_points.shape[0]),
         )
 
     # load pretrain checkpoint and verify
@@ -489,6 +636,25 @@ def main(pars):
             if rank == 0:
                 logging.warning('%s; continuing from random MeanNetwork because require_pretrain_checkpoint=False', message)
 
+    # Frozen Stage-1 anchor for state regularization (always from pretrain weights when present).
+    state_reg_scale = float(getattr(pars.train, 'state_reg_scale', 0.0) or 0.0)
+    if state_reg_scale > 0.0:
+        mean_net_ref = MeanNetwork(norms, resnet=pars.pretrain.resnet, dtype=torch_dtype).to(device)
+        if Path(pretrain_ckpt).exists():
+            ref_state = torch_load_checkpoint(pretrain_ckpt, map_location=device)
+            mean_net_ref.load_state_dict(checkpoint_model_state(ref_state, pretrain_ckpt), strict=True)
+        else:
+            mean_net_ref.load_state_dict(model.mean_net.state_dict(), strict=True)
+        mean_net_ref.eval()
+        for param in mean_net_ref.parameters():
+            param.requires_grad_(False)
+        model.mean_net_ref = mean_net_ref
+        if rank == 0:
+            logging.info(
+                'attached frozen mean_net_ref for state regularization (scale=%.4g) from %s',
+                state_reg_scale,
+                pretrain_ckpt if Path(pretrain_ckpt).exists() else 'current mean_net weights',
+            )
     if distributed:
         ddp_kwargs = {'device_ids': [local_rank], 'output_device': local_rank} if device.type == 'cuda' else {}
         ddp_kwargs['find_unused_parameters'] = True
@@ -569,13 +735,42 @@ def main(pars):
     grid = torch.tensor(grid_np, device=device, dtype=torch_dtype)
     weights = torch.tensor(weights_np / np.sqrt(np.pi), device=device, dtype=torch_dtype)
 
-    # set up freeze NN
-    last_test = [float('nan')] * 3
+    # set up freeze NN / monitoring
+    last_test = [float('nan')] * 6
+    last_eta_metrics = None
     steps_this_epoch = max(len(obs_train_loader), len(phys_train_loader))
     if pars.train.max_steps_per_epoch is not None:
         steps_this_epoch = min(steps_this_epoch, pars.train.max_steps_per_epoch)
     freeze_mean_net_epochs = resolve_mean_net_freeze_epochs(pars)
+    freeze_until_epoch = resolve_mean_net_freeze_until(pars, start_epoch)
     mean_net_is_frozen = None
+    scheduler, scheduler_kind = build_joint_scheduler(optimizer, pars, n_additional_epochs)
+    if rank == 0:
+        logging.info(
+            'joint loss scales: data=%.4g phys=%.4g state_reg=%.4g | kl_eta=%.4g kl_lambda=%.4g | '
+            'freeze until epoch %d exclusive (%d freeze epochs, from_run_start=%s) | '
+            'lr_scheduler=%s | lrs mean=%.3e eta=%.3e lambda=%.3e',
+            float(getattr(pars.train, 'data_scale', 1.0) or 1.0),
+            float(getattr(pars.train, 'phys_scale', 1.0) or 1.0),
+            float(getattr(pars.train, 'state_reg_scale', 0.0) or 0.0),
+            float(pars.prior.kl_eta),
+            float(pars.prior.kl_lambda),
+            freeze_until_epoch,
+            freeze_mean_net_epochs,
+            bool(getattr(pars.train, 'freeze_from_run_start', False)),
+            scheduler_kind,
+            joint_lrs['mean_net'],
+            joint_lrs['vgp_eta'],
+            joint_lrs['vgp_lambda'],
+        )
+
+    metrics_csv = resolve_metrics_csv(pars.train, pars.train.logfile, 'joint')
+    plot_dir = resolve_plot_dir(pars.train, pars.train.logfile, 'joint')
+    plot_every = resolve_plot_every(pars.train)
+    metrics_writer = None
+    if rank == 0:
+        metrics_writer = EpochMetricsWriter(
+            metrics_csv, JOINT_FIELDS, append=bool(getattr(pars.train, 'restore', False)))
 
     for epoch in range(start_epoch, stop_epoch):
         model.train()
@@ -583,24 +778,27 @@ def main(pars):
             if distributed and isinstance(loader.sampler, DistributedSampler):
                 loader.sampler.set_epoch(epoch)
 
-        freeze_mean_net = epoch < freeze_mean_net_epochs
+        # Resume-safe: freeze counted from start_epoch of THIS run, not absolute epoch 0.
+        freeze_mean_net = epoch < freeze_until_epoch
         if freeze_mean_net != mean_net_is_frozen:
             set_module_requires_grad(raw_model.mean_net, not freeze_mean_net)
             mean_net_is_frozen = freeze_mean_net
             if rank == 0:
                 state_text = 'frozen' if freeze_mean_net else 'unfrozen'
                 logging.info(
-                    'epoch %d mean_net %s (freeze epochs: %d, lr_mean=%.6e, lr_eta=%.6e, lr_lambda=%.6e)',
+                    'epoch %d mean_net %s (freeze epochs from start: %d, until=%d, '
+                    'lr_mean=%.6e, lr_eta=%.6e, lr_lambda=%.6e)',
                     epoch,
                     state_text,
                     freeze_mean_net_epochs,
+                    freeze_until_epoch,
                     joint_lrs['mean_net'],
                     joint_lrs['vgp_eta'],
                     joint_lrs['vgp_lambda'],)
 
         obs_iter = iter(obs_train_loader)
         phys_iter = iter(phys_train_loader)
-        running = torch.zeros(4, dtype=torch.float64, device=device)
+        running = torch.zeros(5, dtype=torch.float64, device=device)
         running_debug = init_debug_running()
         for _ in range(steps_this_epoch):
             batch_obs, obs_iter = next_or_restart(obs_iter, obs_train_loader)
@@ -611,13 +809,18 @@ def main(pars):
             optimizer.zero_grad(set_to_none=True)
             losses = joint_loss(
                 model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size, return_debug=True)
-            total_loss = losses[0] + losses[1] + losses[2]
+            total_loss = losses[0] + losses[1] + losses[2] + losses[3]
             total_loss.backward()
             # log norm FIRST
+            eta_shift_grad = raw_model.eta_log_shift.grad
             grad_norms = {
-                'mean_net':    module_grad_norm(raw_model.mean_net),
-                'vgp_eta':     module_grad_norm(raw_model.vgp_eta),
-                'vgp_lambda':  module_grad_norm(raw_model.vgp_lambda),
+                'mean_net': module_grad_norm(raw_model.mean_net),
+                'vgp_eta': module_grad_norm(raw_model.vgp_eta),
+                'vgp_lambda': module_grad_norm(raw_model.vgp_lambda),
+                'eta_log_shift': (
+                    float(eta_shift_grad.detach().abs().item())
+                    if eta_shift_grad is not None else 0.0
+                ),
             }
             # then clip each module to 5, not to 5 globally (double checked is correct)
             if pars.train.grad_clip is not None:
@@ -631,13 +834,13 @@ def main(pars):
                 ]
                 if shift_params:
                     torch.nn.utils.clip_grad_norm_(shift_params, pars.train.grad_clip)
-            update_debug_running(running_debug, losses[3], grad_norms)
+            update_debug_running(running_debug, losses[4], grad_norms)
             optimizer.step()
-            # print(f'losses.shape: {len(losses)}, running shape: {running.shape}, losses[0]: {losses[0]}, losses[2]: {losses[2]}')
             running[0] += losses[0].detach().to(torch.float64)
             running[1] += losses[1].detach().to(torch.float64)
             running[2] += losses[2].detach().to(torch.float64)
-            running[3] += 1.0
+            running[3] += losses[3].detach().to(torch.float64)
+            running[4] += 1.0
 
             if preempt.triggered() and rank == 0:
                 atomic_torch_save(
@@ -657,19 +860,91 @@ def main(pars):
                 print('[slurm] Preemption checkpoint saved. Exiting for requeue.', flush=True)
                 exit_for_slurm_requeue()
 
-        train_stats = reduce_mean(running[:3] / torch.clamp(running[3], min=1.0), world_size).tolist()
+        train_stats = reduce_mean(running[:4] / torch.clamp(running[4], min=1.0), world_size).tolist()
         if epoch % pars.train.test_every == 0:
             last_test = evaluate(model, obs_test_loader, phys_test_loader, device, torch_dtype, grid, weights, pars, world_size)
 
+        eta_eval_every = int(getattr(pars.train, 'eta_eval_every', 0) or 0)
+        if eta_eval_every > 0 and epoch % eta_eval_every == 0 and rank == 0:
+            last_eta_metrics = evaluate_eta_vs_reference(
+                model, snapshot, device, torch_dtype, pars)
+
+        if scheduler is not None:
+            if scheduler_kind == 'plateau':
+                scheduler.step(train_stats[0] + train_stats[1] + train_stats[2] + train_stats[3])
+            else:
+                scheduler.step()
+
         if rank == 0:
-            train_total = train_stats[0] + train_stats[1] + train_stats[2]
-            test_total = last_test[0] + last_test[1] + last_test[2]
+            train_total = train_stats[0] + train_stats[1] + train_stats[2] + train_stats[3]
+            test_total = last_test[0] + last_test[1] + last_test[2] + last_test[3]
             logging.info(
-                '%d %.10f %.10f %.10f %.10f %.10f %.10f %.10f %.10f',
+                '%d %.10f %.10f %.10f %.10f %.10f %.10f %.10f %.10f %.10f %.10f',
                 epoch,
-                train_stats[0], train_stats[1], train_stats[2], train_total,
-                last_test[0], last_test[1], last_test[2], test_total,)
+                train_stats[0], train_stats[1], train_stats[2], train_stats[3], train_total,
+                last_test[0], last_test[1], last_test[2], last_test[3], test_total,)
             logging.info('%s', format_debug_log(epoch, running_debug))
+            grad_warn = maybe_warn_weak_eta_grads(
+                epoch,
+                running_debug,
+                mean_net_is_frozen,
+                getattr(pars.train, 'grad_eta_warn_ratio', 100.0),
+            )
+            if grad_warn is not None:
+                logging.warning('%s', grad_warn)
+            logging.info(
+                'lrs epoch=%d mean_net=%.6e vgp_eta=%.6e vgp_lambda=%.6e',
+                epoch,
+                optimizer.param_groups[0]['lr'],
+                optimizer.param_groups[1]['lr'],
+                optimizer.param_groups[2]['lr'],
+            )
+            if last_eta_metrics is not None:
+                logging.info(
+                    'eta_vs_ref epoch=%d log10_rmse=%.6f log10_bias=%.6f log10_r=%.6f '
+                    'rel_rmse=%.6f eta_pred_mean=%.6g eta_ref_mean=%.6g n=%d',
+                    epoch,
+                    last_eta_metrics['log10_eta_rmse'],
+                    last_eta_metrics['log10_eta_bias'],
+                    last_eta_metrics['log10_eta_r'],
+                    last_eta_metrics['rel_eta_rmse'],
+                    last_eta_metrics['eta_pred_mean'],
+                    last_eta_metrics['eta_ref_mean'],
+                    last_eta_metrics['n_points'],
+                )
+            debug_summary = summarize_debug_running(running_debug)
+            train_pde = debug_summary.get('train_pde', float('nan'))
+            train_bc = debug_summary.get('train_bc', float('nan'))
+            if metrics_writer is not None:
+                row = {
+                    'epoch': epoch,
+                    'train_data': train_stats[0],
+                    'train_phys': train_stats[1],
+                    'train_kl': train_stats[2],
+                    'train_state_reg': train_stats[3],
+                    'train_total': train_total,
+                    'train_pde': train_pde,
+                    'train_bc': train_bc,
+                    'test_data': last_test[0],
+                    'test_phys': last_test[1],
+                    'test_kl': last_test[2],
+                    'test_state_reg': last_test[3],
+                    'test_pde': last_test[4],
+                    'test_bc': last_test[5],
+                    'test_total': test_total,
+                    'lr_mean_net': optimizer.param_groups[0]['lr'],
+                    'lr_vgp_eta': optimizer.param_groups[1]['lr'],
+                    'lr_vgp_lambda': optimizer.param_groups[2]['lr'],
+                    **{k: v for k, v in debug_summary.items() if k not in ('train_pde', 'train_bc')},
+                }
+                if last_eta_metrics is not None:
+                    row.update({
+                        'log10_eta_rmse': last_eta_metrics['log10_eta_rmse'],
+                        'log10_eta_bias': last_eta_metrics['log10_eta_bias'],
+                        'log10_eta_r': last_eta_metrics['log10_eta_r'],
+                        'rel_eta_rmse': last_eta_metrics['rel_eta_rmse'],
+                    })
+                metrics_writer.write_row(row)
             atomic_torch_save(
                 {
                     'model': (model.module if isinstance(model, DDP) else model).state_dict(),
@@ -698,6 +973,15 @@ def main(pars):
                 },
                 ckpt_file_old,
             )
+            if metrics_writer is not None:
+                maybe_plot_training(
+                    'joint', metrics_csv, plot_dir, epoch, plot_every, pars.train.logfile)
+
+    if rank == 0 and metrics_writer is not None:
+        final_epoch = max(stop_epoch - 1, 0)
+        maybe_plot_training(
+            'joint', metrics_csv, plot_dir, final_epoch, max(plot_every, 1), pars.train.logfile)
+        metrics_writer.close()
 
     if distributed:
         dist.barrier()
