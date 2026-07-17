@@ -158,7 +158,19 @@ def main(pars, num_samples=None):
     print(f'loaded checkpoint: {ckpt_file}')
     state = torch_load_checkpoint(ckpt_file, map_location=device)
     require_joint_checkpoint_architecture(state, ckpt_file)
-    model.load_state_dict(state['model'], strict=True)
+    # Training checkpoints may include mean_net_ref.* from state regularization.
+    # Predict does not need that frozen copy — drop those keys for a strict load.
+    model_state = {
+        key: value for key, value in state['model'].items()
+        if not key.startswith('mean_net_ref.')
+    }
+    missing, unexpected = model.load_state_dict(model_state, strict=False)
+    unexpected = [key for key in unexpected if not key.startswith('mean_net_ref.')]
+    if missing or unexpected:
+        raise RuntimeError(
+            f'Checkpoint load mismatch for {ckpt_file}: '
+            f'missing={missing} unexpected={unexpected}'
+        )
     mean_net = model.mean_net
     vgp_eta = model.vgp_eta
     vgp_lambda = model.vgp_lambda

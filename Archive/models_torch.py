@@ -448,12 +448,11 @@ class JointModel(nn.Module):
         self.mean_net = mean_net
         self.vgp_eta = vgp_eta
         self.vgp_lambda = vgp_lambda
-        # Frozen pretrained MeanNetwork used as a soft state anchor (not a submodule).
-        self.mean_net_ref = mean_net_ref
-        if self.mean_net_ref is not None:
-            self.mean_net_ref.eval()
-            for param in self.mean_net_ref.parameters():
-                param.requires_grad_(False)
+        # Frozen pretrained MeanNetwork used as a soft state anchor.
+        # Stored outside the module tree so it is not saved/loaded in state_dict
+        # (predict builds JointModel without a ref copy).
+        object.__setattr__(self, 'mean_net_ref', None)
+        self.set_mean_net_ref(mean_net_ref)
         if dtype is None:
             dtype = next(mean_net.parameters()).dtype
 
@@ -464,6 +463,14 @@ class JointModel(nn.Module):
         # the whole field away from zero.
         self.eta_log_shift = nn.Parameter(torch.tensor(0.0, dtype=dtype))
         self.lambda_logit_shift = nn.Parameter(torch.tensor(0.0, dtype=dtype))
+
+    def set_mean_net_ref(self, mean_net_ref):
+        """Attach a frozen PINN anchor without registering it as a submodule."""
+        if mean_net_ref is not None:
+            mean_net_ref.eval()
+            for param in mean_net_ref.parameters():
+                param.requires_grad_(False)
+        object.__setattr__(self, 'mean_net_ref', mean_net_ref)
 
     def _distance_prior_stats(self, xb, yb, length_scale, prior_std, torch_dtype):
         x = xb.squeeze(-1)
@@ -887,6 +894,19 @@ class JointModel(nn.Module):
         kl_lambda_scale = torch.tensor(pars.prior.kl_lambda, dtype=torch_dtype, device=batch_phys['x'].device) / batch_n.clamp(min=1.0)    
         kl_value = kl_eta_scale * kl_eta + kl_lambda_scale * kl_lambda
 
+        # Soft Gaussian anchor of log η toward log(eta_init).  Prevents the
+        # physics term from collapsing η while mean_net is frozen (observed
+        # when tight ssa_*_std alone preferred η → 0).
+        eta_prior_scale = float(getattr(pars.train, 'eta_prior_scale', 0.0) or 0.0)
+        eta_prior_std = float(getattr(pars.train, 'eta_prior_std', 1.0) or 1.0)
+        eta_prior_reg = torch.zeros((), dtype=torch_dtype, device=batch_phys['x'].device)
+        if eta_prior_scale > 0.0:
+            eta_loc = self.vgp_eta.mean(Xn)
+            # eta = exp(log(eta_init) + eta_log_shift + theta); pull offset to 0.
+            log_eta_offset = self.eta_log_shift + eta_loc
+            eta_prior_reg = 0.5 * torch.mean(
+                (log_eta_offset / max(eta_prior_std, 1.0e-6)) ** 2)
+
         data_scale = torch.tensor(
             float(getattr(pars.train, 'data_scale', 1.0) or 1.0),
             dtype=torch_dtype,
@@ -899,6 +919,10 @@ class JointModel(nn.Module):
         )
         state_reg_scale_t = torch.tensor(
             state_reg_scale, dtype=torch_dtype, device=batch_phys['x'].device)
+        eta_prior_scale_t = torch.tensor(
+            eta_prior_scale, dtype=torch_dtype, device=batch_phys['x'].device)
+        # Fold prior into the KL slot so the existing 4-term train loop is unchanged.
+        kl_and_prior = kl_value + eta_prior_scale_t * eta_prior_reg
         if return_debug and isinstance(debug_stats, dict) and 'loss_components' in debug_stats:
             scale = float(phys_scale.item())
             debug_stats['loss_components'] = {
@@ -907,10 +931,13 @@ class JointModel(nn.Module):
             }
             debug_stats['loss_components']['state_reg'] = float(
                 (state_reg_scale_t * state_reg).detach().item())
+            debug_stats['loss_components']['eta_prior'] = float(
+                (eta_prior_scale_t * eta_prior_reg).detach().item())
+            debug_stats['loss_components']['kl_only'] = float(kl_value.detach().item())
         outputs = (
             data_scale * data_nll,
             phys_scale * physics_nll,
-            kl_value,
+            kl_and_prior,
             state_reg_scale_t * state_reg,
         )
         if return_debug:
@@ -919,8 +946,27 @@ class JointModel(nn.Module):
 
 
 def create_optimizer(optname, parameters, learning_rate=0.0005, **kwargs):
-    if optname == 'adam':
+    name = str(optname or 'adam').strip().lower()
+    # Callers may pass LBFGS-only kwargs unconditionally; strip for other opts.
+    lbfgs_only = {
+        'max_iter': kwargs.pop('max_iter', None),
+        'history_size': kwargs.pop('history_size', None),
+        'line_search_fn': kwargs.pop('line_search_fn', None),
+    }
+    if name == 'adam':
         return torch.optim.Adam(parameters, lr=learning_rate, **kwargs)
-    if optname == 'sgd':
+    if name == 'sgd':
         return torch.optim.SGD(parameters, lr=learning_rate, momentum=0.8, **kwargs)
-    raise NotImplementedError('Unsupported optimizer.')
+    if name in ('lbfgs', 'l-bfgs'):
+        return torch.optim.LBFGS(
+            parameters,
+            lr=learning_rate,
+            max_iter=int(lbfgs_only['max_iter'] if lbfgs_only['max_iter'] is not None else 20),
+            history_size=int(
+                lbfgs_only['history_size'] if lbfgs_only['history_size'] is not None else 10),
+            line_search_fn=(
+                lbfgs_only['line_search_fn']
+                if lbfgs_only['line_search_fn'] is not None else 'strong_wolfe'),
+            **kwargs,
+        )
+    raise NotImplementedError(f'Unsupported optimizer: {optname!r}')

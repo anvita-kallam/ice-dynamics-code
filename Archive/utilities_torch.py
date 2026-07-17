@@ -137,7 +137,7 @@ num_inducing_x = 28
 num_inducing_y = 28
 # 'ice_fps': farthest-point sample on ice mask; 'bbox_grid': uniform bbox mesh.
 inducing_placement = 'ice_fps'
-eta_min = 1.0e-3
+eta_min = 1.0
 eta_max = 1.0e6
 thickness_min = 1.0
 # CHANGED: speed regularization in m/yr (icepack velocity units).
@@ -178,10 +178,23 @@ batch_size = 2048
 physics_batch_size = 512
 # Explicit ELBO term weights (data / physics / KL / pretrained-state anchor).
 data_scale = 1.0
-phys_scale = 5.0
+phys_scale = 2.0
 state_reg_scale = 1.0
+# Soft log-η prior toward log(eta_init); blocks physics-driven η→0 collapse.
+# Keep mild (0.1–0.3) so the prior anchors the mean without flattening spatial η.
+eta_prior_scale = 0.2
+eta_prior_std = 1.0
 # Log a warning when unfrozen mean_net grads dominate vgp_eta by more than this factor.
 grad_eta_warn_ratio = 100.0
+# Split optimizers: independent PINN vs VGP Adam (optional L-BFGS after unfreeze).
+mean_net_optimizer = 'adam'
+mean_net_optimizer_after_unfreeze = 'adam'
+vgp_optimizer = 'adam'
+vgp_steps_per_mean_step = 1
+mean_net_grad_clip = None
+vgp_grad_clip = None
+lbfgs_max_iter = 20
+lbfgs_history_size = 10
 meannet_checkdir = 'checkpoints/torch_pretrain'
 checkdir = 'checkpoints/torch_joint'
 logfile = 'log_train_torch'

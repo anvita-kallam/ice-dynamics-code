@@ -128,9 +128,19 @@ def init_debug_running():
         'grad_norm_sum': {
             'mean_net': 0.0, 'vgp_eta': 0.0, 'vgp_lambda': 0.0, 'eta_log_shift': 0.0,
         },
+        'grad_clip_sum': {'mean_net': 0.0, 'vgp': 0.0},
+        'grad_clip_count': {'mean_net': 0, 'vgp': 0},
         'field_minmax': {name: {'min': float('inf'), 'max': float('-inf')} for name in names},
-        'loss_component_sum': {'momentum_nll': 0.0, 'continuity_nll': 0.0, 'state_reg': 0.0},
-        'loss_component_count': {'momentum_nll': 0, 'continuity_nll': 0, 'state_reg': 0},
+        'loss_component_sum': {
+            'momentum_nll': 0.0, 'continuity_nll': 0.0, 'state_reg': 0.0,
+            'eta_prior': 0.0, 'kl_only': 0.0,
+        },
+        'loss_component_count': {
+            'momentum_nll': 0, 'continuity_nll': 0, 'state_reg': 0,
+            'eta_prior': 0, 'kl_only': 0,
+        },
+        'vgp_updates': 0,
+        'mean_updates': 0,
         'count': 0,
     }
 
@@ -158,15 +168,31 @@ def format_debug_log(epoch, running_debug):
         name: running_debug['grad_norm_sum'].get(name, 0.0) / count
         for name in ('mean_net', 'vgp_eta', 'vgp_lambda', 'eta_log_shift')
     }
-    # After unfreeze, mean_net grads should not drown vgp_eta (~ratio < grad_eta_warn_ratio).
+    # Primary ratio for diagnostics: mean_net / vgp_eta (large => PINN dominates).
     mean_grad = grad_avgs['mean_net']
     eta_grad = grad_avgs['vgp_eta']
-    if mean_grad > 0.0:
-        grad_ratio = eta_grad / mean_grad
+    if eta_grad > 0.0:
+        mean_over_vgp = mean_grad / eta_grad
     else:
-        grad_ratio = float('inf') if eta_grad > 0.0 else float('nan')
+        mean_over_vgp = float('inf') if mean_grad > 0.0 else float('nan')
+    if mean_grad > 0.0:
+        vgp_over_mean = eta_grad / mean_grad
+    else:
+        vgp_over_mean = float('inf') if eta_grad > 0.0 else float('nan')
     grad_part = ' '.join(f'{name}={grad_avgs[name]:.6e}' for name in grad_avgs)
-    grad_part = f'{grad_part} vgp_over_mean={grad_ratio:.3e}'
+    grad_part = (
+        f'{grad_part} mean_over_vgp={mean_over_vgp:.3e} vgp_over_mean={vgp_over_mean:.3e} '
+        f'updates_vgp={int(running_debug.get("vgp_updates", 0))} '
+        f'updates_mean={int(running_debug.get("mean_updates", 0))}'
+    )
+    clip_parts = []
+    for name in ('mean_net', 'vgp'):
+        n_clip = running_debug.get('grad_clip_count', {}).get(name, 0)
+        if n_clip > 0:
+            clip_parts.append(
+                f'clip_{name}={running_debug["grad_clip_sum"][name] / n_clip:.6e}')
+    if clip_parts:
+        grad_part = f'{grad_part} {" ".join(clip_parts)}'
     field_parts = []
     for field_name in ('eta_log', 'theta_eta', 'eta', 'lambda_logit', 'lambda', 'rux', 'rvy', 'rh'):
         stats = running_debug['field_minmax'][field_name]
@@ -268,6 +294,9 @@ def build_joint_scheduler(optimizer, pars, n_epochs_this_run):
     kind = str(getattr(pars.train, 'lr_scheduler', 'none') or 'none').strip().lower()
     if kind in ('', 'none', 'null', 'false'):
         return None, kind
+    # LBFGS does not use epoch-based LR schedules the same way as Adam.
+    if isinstance(optimizer, torch.optim.LBFGS):
+        return None, 'none'
     if kind == 'cosine':
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=max(int(n_epochs_this_run), 1),
@@ -281,6 +310,176 @@ def build_joint_scheduler(optimizer, pars, n_epochs_this_run):
             patience=int(getattr(pars.train, 'lr_scheduler_patience', 50) or 50),
         ), kind
     raise ValueError(f"Unsupported train.lr_scheduler={kind!r}. Use 'none', 'cosine', or 'plateau'.")
+
+
+def build_split_optimizers(raw_model, pars, joint_lrs, mean_opt_name=None):
+    """Create independent optimizers for PINN vs VGP (+shifts)."""
+    if mean_opt_name is None:
+        mean_opt_name = str(
+            getattr(pars.train, 'mean_net_optimizer', pars.train.optimizer) or 'adam')
+    mean_opt_name = str(mean_opt_name).strip().lower()
+    vgp_opt_name = str(getattr(pars.train, 'vgp_optimizer', 'adam') or 'adam').strip().lower()
+    optimizer_mean = create_optimizer(
+        mean_opt_name,
+        list(raw_model.mean_net.parameters()),
+        learning_rate=joint_lrs['mean_net'],
+        max_iter=int(getattr(pars.train, 'lbfgs_max_iter', 20) or 20),
+        history_size=int(getattr(pars.train, 'lbfgs_history_size', 10) or 10),
+    )
+    optimizer_vgp = create_optimizer(
+        vgp_opt_name,
+        [
+            {'params': list(raw_model.vgp_eta.parameters()), 'lr': joint_lrs['vgp_eta']},
+            {'params': list(raw_model.vgp_lambda.parameters()), 'lr': joint_lrs['vgp_lambda']},
+            {
+                'params': [raw_model.eta_log_shift],
+                'lr': float(getattr(pars.train, 'eta_shift_lr', joint_lrs['vgp_eta'])),
+            },
+            {
+                'params': [raw_model.lambda_logit_shift],
+                'lr': float(getattr(pars.train, 'lambda_shift_lr', joint_lrs['vgp_lambda'])),
+            },
+        ],
+        learning_rate=joint_lrs['vgp_eta'],
+    )
+    return optimizer_mean, optimizer_vgp, mean_opt_name, vgp_opt_name
+
+
+def apply_joint_lrs(optimizer_mean, optimizer_vgp, joint_lrs, pars):
+    """Force cfg learning rates onto split optimizers (after restore)."""
+    if optimizer_mean.param_groups:
+        optimizer_mean.param_groups[0]['lr'] = joint_lrs['mean_net']
+    if len(optimizer_vgp.param_groups) >= 4:
+        optimizer_vgp.param_groups[0]['lr'] = joint_lrs['vgp_eta']
+        optimizer_vgp.param_groups[1]['lr'] = joint_lrs['vgp_lambda']
+        optimizer_vgp.param_groups[2]['lr'] = float(
+            getattr(pars.train, 'eta_shift_lr', joint_lrs['vgp_eta']))
+        optimizer_vgp.param_groups[3]['lr'] = float(
+            getattr(pars.train, 'lambda_shift_lr', joint_lrs['vgp_lambda']))
+    elif len(optimizer_vgp.param_groups) >= 1:
+        optimizer_vgp.param_groups[0]['lr'] = joint_lrs['vgp_eta']
+
+
+def resolve_grad_clips(pars):
+    legacy = getattr(pars.train, 'grad_clip', None)
+    mean_clip = getattr(pars.train, 'mean_net_grad_clip', None)
+    vgp_clip = getattr(pars.train, 'vgp_grad_clip', None)
+    if mean_clip is None:
+        mean_clip = legacy
+    if vgp_clip is None:
+        vgp_clip = legacy
+    return (
+        None if mean_clip is None else float(mean_clip),
+        None if vgp_clip is None else float(vgp_clip),
+    )
+
+
+def clip_module_grads(module, max_norm):
+    if max_norm is None:
+        return float('nan')
+    params = [p for p in module.parameters() if p.requires_grad and p.grad is not None]
+    if not params:
+        return float('nan')
+    return float(torch.nn.utils.clip_grad_norm_(params, max_norm).item())
+
+
+def clip_param_grads(params, max_norm):
+    if max_norm is None:
+        return float('nan')
+    usable = [p for p in params if p.requires_grad and p.grad is not None]
+    if not usable:
+        return float('nan')
+    return float(torch.nn.utils.clip_grad_norm_(usable, max_norm).item())
+
+
+def collect_grad_norms(raw_model):
+    eta_shift_grad = raw_model.eta_log_shift.grad
+    return {
+        'mean_net': module_grad_norm(raw_model.mean_net),
+        'vgp_eta': module_grad_norm(raw_model.vgp_eta),
+        'vgp_lambda': module_grad_norm(raw_model.vgp_lambda),
+        'eta_log_shift': (
+            float(eta_shift_grad.detach().abs().item())
+            if eta_shift_grad is not None else 0.0
+        ),
+    }
+
+
+def record_clip_norm(running_debug, name, clipped_norm):
+    if clipped_norm is None or not math.isfinite(float(clipped_norm)):
+        return
+    running_debug['grad_clip_sum'][name] = (
+        running_debug['grad_clip_sum'].get(name, 0.0) + float(clipped_norm))
+    running_debug['grad_clip_count'][name] = (
+        running_debug['grad_clip_count'].get(name, 0) + 1)
+
+
+def set_vgp_trainable(raw_model, trainable):
+    set_module_requires_grad(raw_model.vgp_eta, trainable)
+    set_module_requires_grad(raw_model.vgp_lambda, trainable)
+    raw_model.eta_log_shift.requires_grad_(trainable)
+    raw_model.lambda_logit_shift.requires_grad_(trainable)
+
+
+def pack_joint_checkpoint(
+    raw_model,
+    optimizer_mean,
+    optimizer_vgp,
+    epoch,
+    physics_approximation,
+    mean_opt_kind,
+    extra=None,
+):
+    payload = {
+        'model': raw_model.state_dict(),
+        'optimizer_mean_net': optimizer_mean.state_dict(),
+        'optimizer_vgp': optimizer_vgp.state_dict(),
+        # Legacy key: mirror VGP optimizer for older tooling that only looks for 'optimizer'.
+        'optimizer': optimizer_vgp.state_dict(),
+        'epoch': epoch,
+        'architecture': JOINT_ARCHITECTURE,
+        'mean_net_outputs': MEAN_NET_OUTPUTS,
+        'physics_approximation': physics_approximation,
+        'coordinate_only': True,
+        'mean_net_first_layer_in_features': first_state_layer(raw_model.mean_net).in_features,
+        'mean_net_optimizer_kind': mean_opt_kind,
+        'optimizer_layout': 'split_mean_vgp_v1',
+        'kl_note': 'Uses inducing-space KL inside JointModel.forward.',
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def restore_split_optimizers(state, optimizer_mean, optimizer_vgp, rank):
+    """Load split optimizer states; tolerate legacy single-optimizer checkpoints."""
+    loaded_any = False
+    if 'optimizer_mean_net' in state:
+        try:
+            optimizer_mean.load_state_dict(state['optimizer_mean_net'])
+            loaded_any = True
+            if rank == 0:
+                logging.info('loaded optimizer_mean_net from checkpoint')
+        except (KeyError, ValueError, RuntimeError) as exc:
+            if rank == 0:
+                logging.warning('Skipping optimizer_mean_net restore: %s', exc)
+    if 'optimizer_vgp' in state:
+        try:
+            optimizer_vgp.load_state_dict(state['optimizer_vgp'])
+            loaded_any = True
+            if rank == 0:
+                logging.info('loaded optimizer_vgp from checkpoint')
+        except (KeyError, ValueError, RuntimeError) as exc:
+            if rank == 0:
+                logging.warning('Skipping optimizer_vgp restore: %s', exc)
+    elif 'optimizer' in state and not loaded_any:
+        # Legacy single Adam with 5 param groups — structure no longer matches.
+        if rank == 0:
+            logging.warning(
+                'Checkpoint has legacy single optimizer; skipping optimizer restore '
+                '(model weights still loaded). Re-run with restore_optimizer=False '
+                'or a split-optimizer checkpoint.')
+    return loaded_any
 
 
 def evaluate_eta_vs_reference(model, snapshot, device, torch_dtype, pars, max_points=8192):
@@ -648,7 +847,7 @@ def main(pars):
         mean_net_ref.eval()
         for param in mean_net_ref.parameters():
             param.requires_grad_(False)
-        model.mean_net_ref = mean_net_ref
+        model.set_mean_net_ref(mean_net_ref)
         if rank == 0:
             logging.info(
                 'attached frozen mean_net_ref for state regularization (scale=%.4g) from %s',
@@ -662,16 +861,17 @@ def main(pars):
 
     raw_model = model.module if isinstance(model, DDP) else model
     joint_lrs = resolve_joint_group_lrs(pars)
-    optimizer = create_optimizer(
-        pars.train.optimizer,
-        [
-            {'params': raw_model.mean_net.parameters(), 'lr': joint_lrs['mean_net']},
-            {'params': raw_model.vgp_eta.parameters(), 'lr': joint_lrs['vgp_eta']},
-            {'params': raw_model.vgp_lambda.parameters(), 'lr': joint_lrs['vgp_lambda']},
-            {'params': [raw_model.eta_log_shift], 'lr': getattr(pars.train, 'eta_shift_lr', joint_lrs['vgp_eta'])},
-            {'params': [raw_model.lambda_logit_shift], 'lr': getattr(pars.train, 'lambda_shift_lr', joint_lrs['vgp_lambda'])},
-        ],
-        learning_rate=pars.train.lr)
+    # Start with mean_net_optimizer (Adam while frozen); optionally switch after unfreeze.
+    mean_opt_kind = str(
+        getattr(pars.train, 'mean_net_optimizer', pars.train.optimizer) or 'adam'
+    ).strip().lower()
+    mean_opt_after_unfreeze = str(
+        getattr(pars.train, 'mean_net_optimizer_after_unfreeze', mean_opt_kind) or mean_opt_kind
+    ).strip().lower()
+    optimizer_mean, optimizer_vgp, mean_opt_kind, vgp_opt_kind = build_split_optimizers(
+        raw_model, pars, joint_lrs, mean_opt_name=mean_opt_kind)
+    mean_net_grad_clip, vgp_grad_clip = resolve_grad_clips(pars)
+    vgp_steps_per_mean_step = max(1, int(getattr(pars.train, 'vgp_steps_per_mean_step', 1) or 1))
     ckpt_file_old = checkpoint_path(pars.train.checkdir, pars.train.checkname_old)
     ckpt_file_new = checkpoint_path(pars.train.checkdir, pars.train.checkname_new)
     Path(pars.train.checkdir).mkdir(parents=True, exist_ok=True)
@@ -694,9 +894,13 @@ def main(pars):
         state = torch_load_checkpoint(ckpt_file_old, map_location=device)
         require_checkpoint_architecture(state, ckpt_file_old, JOINT_ARCHITECTURE, 'joint model')
         target = model.module if isinstance(model, DDP) else model
+        joint_state = {
+            key: value for key, value in checkpoint_model_state(state, ckpt_file_old).items()
+            if not key.startswith('mean_net_ref.')
+        }
         strict_load_state_dict(
             target,
-            checkpoint_model_state(state, ckpt_file_old),
+            joint_state,
             ckpt_file_old,
             'joint model',
         )
@@ -706,13 +910,18 @@ def main(pars):
         restore_optimizer = getattr(pars.train, 'restore_optimizer', False)
         if restore_optimizer:
             try:
-                optimizer.load_state_dict(state['optimizer'])
-                completed_epoch =state.get('epoch')
+                restore_split_optimizers(state, optimizer_mean, optimizer_vgp, rank)
+                ckpt_mean_kind = state.get('mean_net_optimizer_kind')
+                if ckpt_mean_kind:
+                    mean_opt_kind = str(ckpt_mean_kind).strip().lower()
+                completed_epoch = state.get('epoch')
                 completed_epoch = int(completed_epoch)
                 start_epoch = completed_epoch + 1
                 stop_epoch = start_epoch + n_additional_epochs
                 if rank == 0:
-                    logging.info('loaded previous optimizer: %s', ckpt_file_old)
+                    logging.info(
+                        'restored split optimizers from: %s (resume at epoch %d)',
+                        ckpt_file_old, start_epoch)
             except (KeyError, ValueError, RuntimeError) as exc:
                 if rank == 0:
                     logging.warning(
@@ -727,9 +936,7 @@ def main(pars):
                 log_mean_net_obs_stats('joint-restore verification on obs_test', joint_verify_stats)
     
     # Always enforce cfg learning rates after restore
-    optimizer.param_groups[0]['lr'] = joint_lrs['mean_net']
-    optimizer.param_groups[1]['lr'] = joint_lrs['vgp_eta']
-    optimizer.param_groups[2]['lr'] = joint_lrs['vgp_lambda']
+    apply_joint_lrs(optimizer_mean, optimizer_vgp, joint_lrs, pars)
 
     grid_np, weights_np = np.polynomial.hermite.hermgauss(pars.train.quadrature_size)
     grid = torch.tensor(grid_np, device=device, dtype=torch_dtype)
@@ -744,21 +951,37 @@ def main(pars):
     freeze_mean_net_epochs = resolve_mean_net_freeze_epochs(pars)
     freeze_until_epoch = resolve_mean_net_freeze_until(pars, start_epoch)
     mean_net_is_frozen = None
-    scheduler, scheduler_kind = build_joint_scheduler(optimizer, pars, n_additional_epochs)
+    switched_mean_optimizer = False
+    scheduler_mean, scheduler_mean_kind = build_joint_scheduler(
+        optimizer_mean, pars, n_additional_epochs)
+    scheduler_vgp, scheduler_vgp_kind = build_joint_scheduler(
+        optimizer_vgp, pars, n_additional_epochs)
     if rank == 0:
         logging.info(
-            'joint loss scales: data=%.4g phys=%.4g state_reg=%.4g | kl_eta=%.4g kl_lambda=%.4g | '
+            'joint loss scales: data=%.4g phys=%.4g state_reg=%.4g eta_prior=%.4g '
+            '(std=%.4g) | kl_eta=%.4g kl_lambda=%.4g | '
             'freeze until epoch %d exclusive (%d freeze epochs, from_run_start=%s) | '
-            'lr_scheduler=%s | lrs mean=%.3e eta=%.3e lambda=%.3e',
+            'optimizers mean=%s (after_unfreeze=%s) vgp=%s | '
+            'vgp_steps_per_mean_step=%d | grad_clip mean=%s vgp=%s | '
+            'lr_scheduler mean=%s vgp=%s | lrs mean=%.3e eta=%.3e lambda=%.3e',
             float(getattr(pars.train, 'data_scale', 1.0) or 1.0),
             float(getattr(pars.train, 'phys_scale', 1.0) or 1.0),
             float(getattr(pars.train, 'state_reg_scale', 0.0) or 0.0),
+            float(getattr(pars.train, 'eta_prior_scale', 0.0) or 0.0),
+            float(getattr(pars.train, 'eta_prior_std', 1.0) or 1.0),
             float(pars.prior.kl_eta),
             float(pars.prior.kl_lambda),
             freeze_until_epoch,
             freeze_mean_net_epochs,
             bool(getattr(pars.train, 'freeze_from_run_start', False)),
-            scheduler_kind,
+            mean_opt_kind,
+            mean_opt_after_unfreeze,
+            vgp_opt_kind,
+            vgp_steps_per_mean_step,
+            str(mean_net_grad_clip),
+            str(vgp_grad_clip),
+            scheduler_mean_kind,
+            scheduler_vgp_kind,
             joint_lrs['mean_net'],
             joint_lrs['vgp_eta'],
             joint_lrs['vgp_lambda'],
@@ -771,6 +994,65 @@ def main(pars):
     if rank == 0:
         metrics_writer = EpochMetricsWriter(
             metrics_csv, JOINT_FIELDS, append=bool(getattr(pars.train, 'restore', False)))
+
+    def accumulate_losses(running, losses):
+        running[0] += losses[0].detach().to(torch.float64)
+        running[1] += losses[1].detach().to(torch.float64)
+        running[2] += losses[2].detach().to(torch.float64)
+        running[3] += losses[3].detach().to(torch.float64)
+        running[4] += 1.0
+
+    def vgp_optimizer_step(batch_obs, batch_phys, running, running_debug):
+        set_module_requires_grad(raw_model.mean_net, False)
+        set_vgp_trainable(raw_model, True)
+        optimizer_vgp.zero_grad(set_to_none=True)
+        optimizer_mean.zero_grad(set_to_none=True)
+        losses = joint_loss(
+            model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size,
+            return_debug=True)
+        total_loss = losses[0] + losses[1] + losses[2] + losses[3]
+        total_loss.backward()
+        grad_norms = collect_grad_norms(raw_model)
+        clipped = clip_module_grads(raw_model.vgp_eta, vgp_grad_clip)
+        clip_module_grads(raw_model.vgp_lambda, vgp_grad_clip)
+        clip_param_grads(
+            [raw_model.eta_log_shift, raw_model.lambda_logit_shift], vgp_grad_clip)
+        record_clip_norm(running_debug, 'vgp', clipped)
+        update_debug_running(running_debug, losses[4], grad_norms)
+        optimizer_vgp.step()
+        running_debug['vgp_updates'] += 1
+        accumulate_losses(running, losses)
+        return losses
+
+    def mean_optimizer_step(batch_obs, batch_phys, running, running_debug):
+        set_module_requires_grad(raw_model.mean_net, True)
+        set_vgp_trainable(raw_model, False)
+        closure_losses = [None]
+
+        def _forward_backward():
+            optimizer_mean.zero_grad(set_to_none=True)
+            optimizer_vgp.zero_grad(set_to_none=True)
+            losses = joint_loss(
+                model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size,
+                return_debug=True)
+            total_loss = losses[0] + losses[1] + losses[2] + losses[3]
+            total_loss.backward()
+            grad_norms = collect_grad_norms(raw_model)
+            clipped = clip_module_grads(raw_model.mean_net, mean_net_grad_clip)
+            record_clip_norm(running_debug, 'mean_net', clipped)
+            update_debug_running(running_debug, losses[4], grad_norms)
+            closure_losses[0] = losses
+            return total_loss
+
+        if isinstance(optimizer_mean, torch.optim.LBFGS):
+            optimizer_mean.step(_forward_backward)
+        else:
+            _forward_backward()
+            optimizer_mean.step()
+        running_debug['mean_updates'] += 1
+        if closure_losses[0] is not None:
+            accumulate_losses(running, closure_losses[0])
+        set_vgp_trainable(raw_model, True)
 
     for epoch in range(start_epoch, stop_epoch):
         model.train()
@@ -795,6 +1077,27 @@ def main(pars):
                     joint_lrs['mean_net'],
                     joint_lrs['vgp_eta'],
                     joint_lrs['vgp_lambda'],)
+            # Optional Adam -> LBFGS (or other) switch once PINN is unfrozen.
+            if (
+                not freeze_mean_net
+                and not switched_mean_optimizer
+                and mean_opt_after_unfreeze != mean_opt_kind
+            ):
+                optimizer_mean = create_optimizer(
+                    mean_opt_after_unfreeze,
+                    list(raw_model.mean_net.parameters()),
+                    learning_rate=joint_lrs['mean_net'],
+                    max_iter=int(getattr(pars.train, 'lbfgs_max_iter', 20) or 20),
+                    history_size=int(getattr(pars.train, 'lbfgs_history_size', 10) or 10),
+                )
+                mean_opt_kind = mean_opt_after_unfreeze
+                scheduler_mean, scheduler_mean_kind = build_joint_scheduler(
+                    optimizer_mean, pars, max(stop_epoch - epoch, 1))
+                switched_mean_optimizer = True
+                if rank == 0:
+                    logging.info(
+                        'epoch %d switched mean_net optimizer to %s',
+                        epoch, mean_opt_kind)
 
         obs_iter = iter(obs_train_loader)
         phys_iter = iter(phys_train_loader)
@@ -806,55 +1109,26 @@ def main(pars):
             batch_obs = move_batch_to_device(batch_obs, device, torch_dtype)
             batch_phys = move_batch_to_device(batch_phys, device, torch_dtype)
 
-            optimizer.zero_grad(set_to_none=True)
-            losses = joint_loss(
-                model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size, return_debug=True)
-            total_loss = losses[0] + losses[1] + losses[2] + losses[3]
-            total_loss.backward()
-            # log norm FIRST
-            eta_shift_grad = raw_model.eta_log_shift.grad
-            grad_norms = {
-                'mean_net': module_grad_norm(raw_model.mean_net),
-                'vgp_eta': module_grad_norm(raw_model.vgp_eta),
-                'vgp_lambda': module_grad_norm(raw_model.vgp_lambda),
-                'eta_log_shift': (
-                    float(eta_shift_grad.detach().abs().item())
-                    if eta_shift_grad is not None else 0.0
-                ),
-            }
-            # then clip each module to 5, not to 5 globally (double checked is correct)
-            if pars.train.grad_clip is not None:
-                for module in (raw_model.mean_net, raw_model.vgp_eta, raw_model.vgp_lambda):
-                    params = [p for p in module.parameters() if p.requires_grad and p.grad is not None]
-                    if params:
-                        torch.nn.utils.clip_grad_norm_(params, pars.train.grad_clip)
-                shift_params = [
-                    p for p in (raw_model.eta_log_shift, raw_model.lambda_logit_shift)
-                    if p.requires_grad and p.grad is not None
-                ]
-                if shift_params:
-                    torch.nn.utils.clip_grad_norm_(shift_params, pars.train.grad_clip)
-            update_debug_running(running_debug, losses[4], grad_norms)
-            optimizer.step()
-            running[0] += losses[0].detach().to(torch.float64)
-            running[1] += losses[1].detach().to(torch.float64)
-            running[2] += losses[2].detach().to(torch.float64)
-            running[3] += losses[3].detach().to(torch.float64)
-            running[4] += 1.0
+            # Frozen phase: VGP-only, one step per batch (unchanged behavior).
+            # After unfreeze: N VGP steps then 1 mean_net step.
+            if freeze_mean_net:
+                vgp_optimizer_step(batch_obs, batch_phys, running, running_debug)
+            else:
+                for _vgp_i in range(vgp_steps_per_mean_step):
+                    vgp_optimizer_step(batch_obs, batch_phys, running, running_debug)
+                mean_optimizer_step(batch_obs, batch_phys, running, running_debug)
+
+            # Restore freeze flags for the next iteration's bookkeeping.
+            set_module_requires_grad(raw_model.mean_net, not freeze_mean_net)
+            set_vgp_trainable(raw_model, True)
 
             if preempt.triggered() and rank == 0:
                 atomic_torch_save(
-                    {
-                        'model': raw_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'epoch': epoch,
-                        'architecture': JOINT_ARCHITECTURE,
-                        'mean_net_outputs': MEAN_NET_OUTPUTS,
-                        'physics_approximation': physics_approximation,
-                        'coordinate_only': True,
-                        'mean_net_first_layer_in_features': first_state_layer(raw_model.mean_net).in_features,
-                        'preempt_checkpoint': True,
-                    },
+                    pack_joint_checkpoint(
+                        raw_model, optimizer_mean, optimizer_vgp, epoch,
+                        physics_approximation, mean_opt_kind,
+                        extra={'preempt_checkpoint': True},
+                    ),
                     ckpt_file_old,
                 )
                 print('[slurm] Preemption checkpoint saved. Exiting for requeue.', flush=True)
@@ -869,11 +1143,16 @@ def main(pars):
             last_eta_metrics = evaluate_eta_vs_reference(
                 model, snapshot, device, torch_dtype, pars)
 
-        if scheduler is not None:
-            if scheduler_kind == 'plateau':
-                scheduler.step(train_stats[0] + train_stats[1] + train_stats[2] + train_stats[3])
+        for sched, kind in (
+            (scheduler_mean, scheduler_mean_kind),
+            (scheduler_vgp, scheduler_vgp_kind),
+        ):
+            if sched is None:
+                continue
+            if kind == 'plateau':
+                sched.step(train_stats[0] + train_stats[1] + train_stats[2] + train_stats[3])
             else:
-                scheduler.step()
+                sched.step()
 
         if rank == 0:
             train_total = train_stats[0] + train_stats[1] + train_stats[2] + train_stats[3]
@@ -884,6 +1163,13 @@ def main(pars):
                 train_stats[0], train_stats[1], train_stats[2], train_stats[3], train_total,
                 last_test[0], last_test[1], last_test[2], last_test[3], test_total,)
             logging.info('%s', format_debug_log(epoch, running_debug))
+            eta_prior_count = running_debug.get('loss_component_count', {}).get('eta_prior', 0)
+            if eta_prior_count > 0:
+                eta_prior_avg = (
+                    running_debug['loss_component_sum']['eta_prior'] / eta_prior_count)
+                logging.info(
+                    'eta_prior epoch=%d value=%.6e (folded into kl column)',
+                    epoch, eta_prior_avg)
             grad_warn = maybe_warn_weak_eta_grads(
                 epoch,
                 running_debug,
@@ -892,12 +1178,21 @@ def main(pars):
             )
             if grad_warn is not None:
                 logging.warning('%s', grad_warn)
+            lr_mean = optimizer_mean.param_groups[0]['lr']
+            lr_eta = optimizer_vgp.param_groups[0]['lr']
+            lr_lambda = (
+                optimizer_vgp.param_groups[1]['lr']
+                if len(optimizer_vgp.param_groups) > 1 else lr_eta)
             logging.info(
-                'lrs epoch=%d mean_net=%.6e vgp_eta=%.6e vgp_lambda=%.6e',
+                'lrs epoch=%d mean_net=%.6e (%s) vgp_eta=%.6e vgp_lambda=%.6e | '
+                'updates_vgp=%d updates_mean=%d',
                 epoch,
-                optimizer.param_groups[0]['lr'],
-                optimizer.param_groups[1]['lr'],
-                optimizer.param_groups[2]['lr'],
+                lr_mean,
+                mean_opt_kind,
+                lr_eta,
+                lr_lambda,
+                int(running_debug.get('vgp_updates', 0)),
+                int(running_debug.get('mean_updates', 0)),
             )
             if last_eta_metrics is not None:
                 logging.info(
@@ -912,9 +1207,19 @@ def main(pars):
                     last_eta_metrics['eta_ref_mean'],
                     last_eta_metrics['n_points'],
                 )
+                # Flag the collapse mode seen with over-strong physics + no prior.
+                if last_eta_metrics['log10_eta_bias'] < -1.0:
+                    logging.warning(
+                        'epoch %d eta_vs_ref log10_bias=%.3f (eta << ref); '
+                        'check eta_prior_scale / eta_min',
+                        epoch, last_eta_metrics['log10_eta_bias'])
             debug_summary = summarize_debug_running(running_debug)
             train_pde = debug_summary.get('train_pde', float('nan'))
             train_bc = debug_summary.get('train_bc', float('nan'))
+            count = max(running_debug['count'], 1)
+            mean_g = running_debug['grad_norm_sum'].get('mean_net', 0.0) / count
+            eta_g = running_debug['grad_norm_sum'].get('vgp_eta', 0.0) / count
+            grad_ratio = (mean_g / eta_g) if eta_g > 0.0 else float('nan')
             if metrics_writer is not None:
                 row = {
                     'epoch': epoch,
@@ -932,47 +1237,44 @@ def main(pars):
                     'test_pde': last_test[4],
                     'test_bc': last_test[5],
                     'test_total': test_total,
-                    'lr_mean_net': optimizer.param_groups[0]['lr'],
-                    'lr_vgp_eta': optimizer.param_groups[1]['lr'],
-                    'lr_vgp_lambda': optimizer.param_groups[2]['lr'],
+                    'lr_mean_net': lr_mean,
+                    'lr_vgp_eta': lr_eta,
+                    'lr_vgp_lambda': lr_lambda,
+                    'grad_ratio': grad_ratio,
+                    'vgp_updates': int(running_debug.get('vgp_updates', 0)),
+                    'mean_updates': int(running_debug.get('mean_updates', 0)),
+                    'mean_net_opt_kind': mean_opt_kind,
+                    'mean_net_frozen': int(bool(freeze_mean_net)),
                     **{k: v for k, v in debug_summary.items() if k not in ('train_pde', 'train_bc')},
                 }
+                eta_prior_n = running_debug.get('loss_component_count', {}).get('eta_prior', 0)
+                if eta_prior_n > 0:
+                    row['train_eta_prior'] = (
+                        running_debug['loss_component_sum']['eta_prior'] / eta_prior_n)
+                kl_only_n = running_debug.get('loss_component_count', {}).get('kl_only', 0)
+                if kl_only_n > 0:
+                    row['train_kl_only'] = (
+                        running_debug['loss_component_sum']['kl_only'] / kl_only_n)
                 if last_eta_metrics is not None:
                     row.update({
                         'log10_eta_rmse': last_eta_metrics['log10_eta_rmse'],
                         'log10_eta_bias': last_eta_metrics['log10_eta_bias'],
                         'log10_eta_r': last_eta_metrics['log10_eta_r'],
                         'rel_eta_rmse': last_eta_metrics['rel_eta_rmse'],
+                        'eta_pred_mean': last_eta_metrics.get('eta_pred_mean'),
+                        'eta_ref_mean': last_eta_metrics.get('eta_ref_mean'),
                     })
                 metrics_writer.write_row(row)
-            atomic_torch_save(
-                {
-                    'model': (model.module if isinstance(model, DDP) else model).state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'architecture': JOINT_ARCHITECTURE,
-                    'mean_net_outputs': MEAN_NET_OUTPUTS,
-                    'physics_approximation': physics_approximation,
-                    'coordinate_only': True,
-                    'mean_net_first_layer_in_features': first_state_layer((model.module if isinstance(model, DDP) else model).mean_net).in_features,
-                    'kl_note': 'Uses batchwise posterior-vs-prior KL inside JointModel.forward.',
-                },
-                ckpt_file_new,
+            ckpt_payload = pack_joint_checkpoint(
+                (model.module if isinstance(model, DDP) else model),
+                optimizer_mean,
+                optimizer_vgp,
+                epoch,
+                physics_approximation,
+                mean_opt_kind,
             )
-            atomic_torch_save(
-                {
-                    'model': (model.module if isinstance(model, DDP) else model).state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'architecture': JOINT_ARCHITECTURE,
-                    'mean_net_outputs': MEAN_NET_OUTPUTS,
-                    'physics_approximation': physics_approximation,
-                    'coordinate_only': True,
-                    'mean_net_first_layer_in_features': first_state_layer((model.module if isinstance(model, DDP) else model).mean_net).in_features,
-                    'kl_note': 'Uses batchwise posterior-vs-prior KL inside JointModel.forward.',
-                },
-                ckpt_file_old,
-            )
+            atomic_torch_save(ckpt_payload, ckpt_file_new)
+            atomic_torch_save(ckpt_payload, ckpt_file_old)
             if metrics_writer is not None:
                 maybe_plot_training(
                     'joint', metrics_csv, plot_dir, epoch, plot_every, pars.train.logfile)

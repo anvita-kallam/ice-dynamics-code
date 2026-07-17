@@ -199,24 +199,30 @@ The previous more_sliding joint run minimized the ELBO mainly by retuning PINN s
 - no anchor to the pretrained PINN state
 - unused λ KL under SSA
 
-`run_torch.cfg` now defaults to an η-first recipe:
+`run_torch.cfg` now defaults to a **spatial-η recovery** recipe (after mean-η stability was achieved):
 
 | Knob | Recommended | Role |
 |------|-------------|------|
-| `freeze_mean_net_epochs` | 400 | Freeze PINN for first N absolute epochs (resume-safe) |
-| `mean_net_lr` / `vgp_eta_lr` | `1e-5` / `2e-3` | Prefer η updates after unfreeze |
-| `data_scale` / `phys_scale` / `state_reg_scale` | `1` / `5` / `1` | Stronger physics weight + soft state anchor |
-| `ssa_rx_std` / `ssa_ry_std` | `0.05` | Match `|r|~1e-2` so residual term beats NLL floor |
-| `num_inducing_x/y` + `inducing_placement` | `28` / `ice_fps` | Denser ice-masked inducing set (not bbox holes) |
-| `kl_lambda` | `0` | λ unused in SSA |
-| `lr_scheduler` | `cosine` | Avoid plateau |
+| `freeze_mean_net_epochs` | 800 | Longer VGP-only phase before PINN can absorb residuals |
+| `mean_net_lr` / `vgp_eta_lr` | `1e-5` / `5e-4` | Prefer η updates; higher VGP LR while frozen |
+| `data_scale` / `phys_scale` / `state_reg_scale` | `1` / `3` / `1` | Slightly stronger physics after milder η prior |
+| `eta_prior_scale` / `eta_prior_std` | `0.2` / `1` | Anchor mean near `eta_init` without flattening spatial η |
+| `eta_min` | `1.0` | Hard floor against η→0 |
+| `ssa_rx_std` / `ssa_ry_std` | `0.08` | Residual-aware physics |
+| `num_inducing_x/y` + `inducing_placement` | `28` / `ice_fps` | More inducing capacity for spatial structure |
+| `mean_net_optimizer` / `vgp_optimizer` | `adam` / `adam` | Split optimizers (independent LR / clip / schedule) |
+| `mean_net_optimizer_after_unfreeze` | `lbfgs` | Optional PINN fine-tune after freeze ends |
+| `vgp_steps_per_mean_step` | `8` | Alternating: N VGP steps per 1 PINN step (after unfreeze) |
+| `mean_net_grad_clip` / `vgp_grad_clip` | `1` / `5` | Per-module clipping |
+| `kl_eta` / `kl_lambda` | `0.5` / `0` | Stronger η KL; λ unused in SSA |
+| `lr_scheduler` | `cosine` | Applied independently to each Adam optimizer |
 | `eta_eval_every` | `10` | Log η RMSE / bias / corr vs spin-up viscosity |
 | `grad_eta_warn_ratio` | `100` | Warn if unfrozen mean_net grads drown `vgp_eta` |
-| `restore` | `False` | Fresh joint train from Stage-1 pretrain |
+| `restore` | `False` | Fresh joint train (inducing / optimizer layout changed) |
 
-**Important:** previous epochs showed `phys≈1.84` flat while `|r_ux|,|r_vy|~1e-2` — with `ssa_*_std=1`, that is the Gaussian constant floor, so η never sees a useful physics gradient. Tightening `ssa_*_std` to `0.05` and raising `phys_scale` to `5` is meant to fix that. Changing inducing size/placement changes VGP parameter shapes → start fresh (`restore=False`), do not resume the 400-inducing checkpoint.
+**Important:** A prior run recovered unbiased mean η (`log10_bias≈0`) but **flat** spatial η (`r≈0`) because after unfreeze the PINN grads dominated (~6000×). Split optimizers + alternating VGP-heavy updates aim to let the VGP explain remaining PDE mismatch. Changing inducing size changes VGP shapes → start fresh (`restore=False`); archive flat-η checkpoints before resubmitting.
 
-Logs now include per-epoch: data / phys / KL / state_reg / total (train+test), module grad norms (`vgp_over_mean` ratio, `eta_log_shift`), LRs, and `eta_vs_ref` metrics when viscosity is present in the NPZ.
+Logs / CSV now include per-epoch: ELBO terms (data / phys / KL / η prior / state_reg), per-optimizer LRs, VGP vs PINN update counts, module grad norms, `grad_ratio` (`mean_net/vgp_eta`), and `eta_vs_ref` metrics when viscosity is present in the NPZ.
 
 ---
 

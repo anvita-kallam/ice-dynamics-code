@@ -25,6 +25,10 @@ outputs/logs/
 outputs/**/*.npz
 outputs/**/*.h5
 outputs/**/*.png
+# Keep curated VI validation maps in git
+!outputs/figures/vi/
+!outputs/figures/vi/**/
+!outputs/figures/vi/**/*.png
 
 # Secrets
 .env

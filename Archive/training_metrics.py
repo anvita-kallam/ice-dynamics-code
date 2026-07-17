@@ -40,6 +40,8 @@ JOINT_FIELDS = (
     'train_total',
     'train_pde',
     'train_bc',
+    'train_eta_prior',
+    'train_kl_only',
     'test_data',
     'test_phys',
     'test_kl',
@@ -50,13 +52,20 @@ JOINT_FIELDS = (
     'grad_mean_net',
     'grad_vgp_eta',
     'grad_vgp_lambda',
+    'grad_ratio',
+    'vgp_updates',
+    'mean_updates',
     'lr_mean_net',
     'lr_vgp_eta',
     'lr_vgp_lambda',
+    'mean_net_opt_kind',
     'log10_eta_rmse',
     'log10_eta_bias',
     'log10_eta_r',
     'rel_eta_rmse',
+    'eta_pred_mean',
+    'eta_ref_mean',
+    'mean_net_frozen',
     'eta_min',
     'eta_max',
     'lambda_min',
@@ -86,11 +95,22 @@ JOINT_LOG_RE = re.compile(
 DEBUG_GRAD_RE = re.compile(
     rf'debug\s+(\d+)\s+grad_norms\s+'
     rf'mean_net=({_LOG_FLOAT})\s+vgp_eta=({_LOG_FLOAT})\s+vgp_lambda=({_LOG_FLOAT})'
-    rf'(?:\s+eta_log_shift={_LOG_FLOAT})?(?:\s+vgp_over_mean={_LOG_FLOAT})?',
+    rf'(?:\s+eta_log_shift={_LOG_FLOAT})?'
+    rf'(?:\s+mean_over_vgp={_LOG_FLOAT})?(?:\s+vgp_over_mean={_LOG_FLOAT})?',
     re.IGNORECASE,
 )
 DEBUG_FIELD_RE = re.compile(
     rf'(\w+)=\[({_LOG_FLOAT}),({_LOG_FLOAT})\]',
+    re.IGNORECASE,
+)
+ETA_VS_REF_RE = re.compile(
+    rf'eta_vs_ref\s+epoch=(\d+)\s+'
+    rf'log10_rmse=({_LOG_FLOAT})\s+log10_bias=({_LOG_FLOAT})\s+log10_r=({_LOG_FLOAT})\s+'
+    rf'rel_rmse=({_LOG_FLOAT})\s+eta_pred_mean=({_LOG_FLOAT})\s+eta_ref_mean=({_LOG_FLOAT})',
+    re.IGNORECASE,
+)
+MEAN_NET_FREEZE_RE = re.compile(
+    r'epoch\s+(\d+)\s+mean_net\s+(frozen|unfrozen)',
     re.IGNORECASE,
 )
 
@@ -212,7 +232,15 @@ def summarize_debug_running(running_debug: dict) -> dict[str, float]:
         'grad_vgp_lambda': running_debug['grad_norm_sum']['vgp_lambda'] / count,
         'train_pde': _component_avg('momentum_nll'),
         'train_bc': _component_avg('continuity_nll'),
+        'train_eta_prior': _component_avg('eta_prior'),
+        'train_kl_only': _component_avg('kl_only'),
+        'vgp_updates': float(running_debug.get('vgp_updates', 0)),
+        'mean_updates': float(running_debug.get('mean_updates', 0)),
     }
+    mean_g = summary['grad_mean_net']
+    eta_g = summary['grad_vgp_eta']
+    summary['grad_ratio'] = (mean_g / eta_g) if eta_g > 0.0 else float('nan')
+
     for field_name, csv_prefix in (
         ('eta', 'eta'),
         ('lambda', 'lambda'),
@@ -338,6 +366,29 @@ def parse_joint_log(logfile: str | Path) -> dict[str, np.ndarray]:
                     'test_total': legacy.group(9),
                 }
                 continue
+            eta_match = ETA_VS_REF_RE.search(stripped)
+            if eta_match:
+                epoch = int(eta_match.group(1))
+                debug_by_epoch.setdefault(epoch, {})
+                debug_by_epoch[epoch].update(
+                    {
+                        'log10_eta_rmse': eta_match.group(2),
+                        'log10_eta_bias': eta_match.group(3),
+                        'log10_eta_r': eta_match.group(4),
+                        'rel_eta_rmse': eta_match.group(5),
+                        'eta_pred_mean': eta_match.group(6),
+                        'eta_ref_mean': eta_match.group(7),
+                    }
+                )
+                continue
+            freeze_match = MEAN_NET_FREEZE_RE.search(stripped)
+            if freeze_match:
+                epoch = int(freeze_match.group(1))
+                debug_by_epoch.setdefault(epoch, {})
+                debug_by_epoch[epoch]['mean_net_frozen'] = (
+                    1.0 if freeze_match.group(2).lower() == 'frozen' else 0.0
+                )
+                continue
             debug_match = DEBUG_GRAD_RE.search(stripped)
             if debug_match:
                 epoch = int(debug_match.group(1))
@@ -360,11 +411,21 @@ def parse_joint_log(logfile: str | Path) -> dict[str, np.ndarray]:
                     debug_by_epoch[epoch][f'{name}_min'] = field_match.group(2)
                     debug_by_epoch[epoch][f'{name}_max'] = field_match.group(3)
 
+    # Carry eta_vs_ref metrics onto nearby epoch rows even if logged only every N epochs.
     rows = []
     for epoch in sorted(epoch_rows):
         row = dict(epoch_rows[epoch])
         row.update(debug_by_epoch.get(epoch, {}))
         rows.append(row)
+    # Also keep eta-only epochs that may lack a full loss line.
+    for epoch, extras in debug_by_epoch.items():
+        if epoch in epoch_rows:
+            continue
+        if any(key.startswith('log10_eta') or key == 'eta_pred_mean' for key in extras):
+            row = {'epoch': epoch}
+            row.update(extras)
+            rows.append(row)
+    rows.sort(key=lambda item: int(float(item['epoch'])))
     return _rows_to_arrays(rows, JOINT_FIELDS)
 
 
@@ -496,50 +557,158 @@ def iter_pretrain_figures(metrics: dict[str, np.ndarray]):
     yield 'loss_components', fig
 
 
+def _mark_freeze_transition(ax, metrics: dict[str, np.ndarray]) -> None:
+    frozen = metrics.get('mean_net_frozen')
+    epoch = metrics.get('epoch')
+    if frozen is None or epoch is None or epoch.size == 0:
+        return
+    mask = np.isfinite(frozen)
+    if not mask.any():
+        return
+    # Vertical line at first unfrozen epoch if present.
+    unfrozen = epoch[mask & (frozen < 0.5)]
+    if unfrozen.size:
+        ax.axvline(float(unfrozen[0]), color='0.4', linestyle=':', linewidth=1.2, label='mean_net unfreeze')
+
+
+def _plot_signed_train_val(
+    ax,
+    epoch: np.ndarray,
+    train_values: np.ndarray,
+    val_values: np.ndarray,
+    label: str,
+    color: str,
+):
+    train_mask = np.isfinite(train_values)
+    val_mask = np.isfinite(val_values)
+    if train_mask.any():
+        ax.plot(epoch[train_mask], train_values[train_mask], color=color, linestyle='-', label=f'{label} (train)')
+    if val_mask.any():
+        ax.plot(
+            epoch[val_mask],
+            val_values[val_mask],
+            color=color,
+            linestyle='--',
+            alpha=0.9,
+            label=f'{label} (val)',
+        )
+
+
 def iter_joint_figures(metrics: dict[str, np.ndarray]):
-    """Yield recommended VI + PINN joint loss curves."""
+    """Yield recommended VI + PINN joint loss / η-recovery curves."""
     metrics = _enrich_joint_metrics(metrics)
     epoch = metrics['epoch']
     if epoch.size == 0:
         return
 
-    fig, axes = plt.subplots(2, 1, figsize=(9, 8), sharex=True, gridspec_kw={'height_ratios': [1.2, 1.4]})
+    fig, axes = plt.subplots(3, 1, figsize=(9, 9.5), sharex=True, gridspec_kw={'height_ratios': [1.1, 1.0, 1.0]})
 
-    _plot_log_train_val(
+    # Total can be negative when physics NLL has a small-σ log(σ) floor — plot signed.
+    _plot_signed_train_val(
         axes[0],
         epoch,
         metrics['train_total'],
         metrics['test_total'],
         'total loss (ELBO)',
         'black',
-        linewidth=2.4,
     )
-    axes[0].set_ylabel(r'$\log_{10}$(loss)')
-    axes[0].set_title('Joint train — total & validation (data + PDE + KL)')
-    axes[0].legend(loc='best')
+    axes[0].set_ylabel('loss')
+    axes[0].set_title('Joint train — total & validation (data + PDE + KL + anchors)')
+    _mark_freeze_transition(axes[0], metrics)
+    axes[0].legend(loc='best', fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
     _plot_log_train_val(axes[1], epoch, metrics['train_data'], metrics['test_data'], 'data loss', 'tab:blue')
-    _plot_log_train_val(axes[1], epoch, metrics['train_pde'], metrics['test_pde'], 'PDE residual', 'tab:orange')
-    if np.any(np.isfinite(metrics['train_bc'])) or np.any(np.isfinite(metrics['test_bc'])):
+    if np.any(np.isfinite(metrics.get('train_kl', np.array([])))):
         _plot_log_train_val(
-            axes[1], epoch, metrics['train_bc'], metrics['test_bc'], 'BC / continuity', 'tab:green'
+            axes[1], epoch, metrics['train_kl'], metrics['test_kl'], 'KL (+η prior)', 'tab:purple'
         )
-    else:
-        axes[1].text(
-            0.02,
-            0.04,
-            'BC loss not logged (ssa_enforce_continuity=False in this run)',
-            transform=axes[1].transAxes,
-            fontsize=9,
-            color='0.35',
-        )
-    axes[1].set_xlabel('epoch')
     axes[1].set_ylabel(r'$\log_{10}$(loss)')
-    axes[1].set_title('Joint train — data, PDE momentum, and boundary / continuity')
+    axes[1].set_title('Joint train — data and KL / η-prior')
+    _mark_freeze_transition(axes[1], metrics)
     axes[1].legend(loc='best', fontsize=8)
     axes[1].grid(True, alpha=0.3)
+
+    # Physics can be negative with tight ssa_*_std; use signed axis.
+    _plot_signed_train_val(axes[2], epoch, metrics['train_phys'], metrics['test_phys'], 'physics NLL', 'tab:orange')
+    if np.any(np.isfinite(metrics.get('train_state_reg', np.array([])))):
+        _plot_signed_train_val(
+            axes[2],
+            epoch,
+            metrics['train_state_reg'],
+            metrics['test_state_reg'],
+            'state reg',
+            'tab:green',
+        )
+    axes[2].set_xlabel('epoch')
+    axes[2].set_ylabel('NLL / reg')
+    axes[2].set_title('Joint train — physics NLL and state regularization')
+    _mark_freeze_transition(axes[2], metrics)
+    axes[2].legend(loc='best', fontsize=8)
+    axes[2].grid(True, alpha=0.3)
     yield 'recommended_losses', fig
+
+    # η recovery vs spin-up reference (most important for this tuning campaign).
+    has_eta = np.any(np.isfinite(metrics.get('log10_eta_bias', np.array([np.nan]))))
+    if has_eta:
+        fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+        bias = metrics['log10_eta_bias']
+        rmse = metrics['log10_eta_rmse']
+        corr = metrics['log10_eta_r']
+        mask = np.isfinite(bias) | np.isfinite(rmse) | np.isfinite(corr)
+        axes[0].plot(epoch[np.isfinite(bias)], bias[np.isfinite(bias)], color='tab:red', label=r'$\log_{10}$ bias')
+        axes[0].axhline(0.0, color='0.5', linestyle='--', linewidth=1.0)
+        axes[0].set_ylabel(r'$\log_{10}\eta$ bias')
+        axes[0].set_title(r'η recovery vs spin-up — bias (0 = unbiased mean)')
+        _mark_freeze_transition(axes[0], metrics)
+        axes[0].legend(loc='best', fontsize=8)
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(epoch[np.isfinite(rmse)], rmse[np.isfinite(rmse)], color='tab:orange', label=r'$\log_{10}$ RMSE')
+        if np.any(np.isfinite(corr)):
+            axes[1].plot(epoch[np.isfinite(corr)], corr[np.isfinite(corr)], color='tab:green', label=r'$\log_{10}$ corr $r$')
+        axes[1].set_ylabel('score')
+        axes[1].set_title(r'η recovery — $\log_{10}$ RMSE and correlation')
+        _mark_freeze_transition(axes[1], metrics)
+        axes[1].legend(loc='best', fontsize=8)
+        axes[1].grid(True, alpha=0.3)
+
+        pred = metrics.get('eta_pred_mean')
+        ref = metrics.get('eta_ref_mean')
+        if pred is not None and np.any(np.isfinite(pred)):
+            axes[2].plot(epoch[np.isfinite(pred)], pred[np.isfinite(pred)], color='tab:blue', label=r'predicted $\langle\eta\rangle$')
+        if ref is not None and np.any(np.isfinite(ref)):
+            axes[2].plot(epoch[np.isfinite(ref)], ref[np.isfinite(ref)], color='black', linestyle='--', label=r'reference $\langle\eta\rangle$')
+        axes[2].set_xlabel('epoch')
+        axes[2].set_ylabel(r'$\eta$ (MPa·yr)')
+        axes[2].set_title('η recovery — mean predicted vs reference')
+        _mark_freeze_transition(axes[2], metrics)
+        axes[2].legend(loc='best', fontsize=8)
+        axes[2].grid(True, alpha=0.3)
+        yield 'eta_vs_ref', fig
+
+    # Gradient norms: confirm η pathway is alive relative to mean_net.
+    has_grads = np.any(np.isfinite(metrics.get('grad_vgp_eta', np.array([np.nan]))))
+    if has_grads:
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        for key, label, color in (
+            ('grad_mean_net', 'mean_net', 'tab:blue'),
+            ('grad_vgp_eta', 'vgp_eta', 'tab:red'),
+            ('grad_vgp_lambda', 'vgp_lambda', 'tab:gray'),
+        ):
+            values = metrics.get(key)
+            if values is None:
+                continue
+            mask = np.isfinite(values) & (values > 0)
+            if mask.any():
+                ax.semilogy(epoch[mask], values[mask], label=label, color=color)
+        ax.set_xlabel('epoch')
+        ax.set_ylabel('grad norm')
+        ax.set_title('Joint train — module gradient norms')
+        _mark_freeze_transition(ax, metrics)
+        ax.legend(loc='best', fontsize=8)
+        ax.grid(True, alpha=0.3, which='both')
+        yield 'grad_norms', fig
 
 
 def display_pretrain_metrics(metrics: dict[str, np.ndarray]) -> list[plt.Figure]:
