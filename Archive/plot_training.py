@@ -12,8 +12,10 @@ from pathlib import Path
 from training_metrics import (
     load_joint_metrics,
     load_pretrain_metrics,
+    load_vi_only_metrics,
     plot_joint_metrics,
     plot_pretrain_metrics,
+    plot_vi_only_metrics,
     read_plot_paths_from_cfg,
     resolve_metrics_csv,
     resolve_plot_dir,
@@ -21,9 +23,9 @@ from training_metrics import (
 
 usage = """
 Usage:
-  python plot_training.py run_torch.cfg [--stage pretrain|joint|all]
-  python plot_training.py --metrics-csv path/to/metrics.csv --stage pretrain|joint
-  python plot_training.py --logfile path/to/log_train_... --stage joint
+  python plot_training.py run_torch.cfg [--stage pretrain|joint|vi_only|all]
+  python plot_training.py --metrics-csv path/to/metrics.csv --stage pretrain|joint|vi_only
+  python plot_training.py --logfile path/to/log_train_... --stage joint|vi_only
 """
 
 
@@ -53,6 +55,12 @@ def _plot_stage_from_cfg(stage: str, cfg_path: Path) -> list[Path]:
             sec.logfile if Path(sec.logfile).exists() else None,
         )
         return plot_joint_metrics(metrics, plot_dir)
+    if stage == 'vi_only':
+        metrics = load_vi_only_metrics(
+            metrics_csv if Path(metrics_csv).exists() else None,
+            sec.logfile if Path(sec.logfile).exists() else None,
+        )
+        return plot_vi_only_metrics(metrics, plot_dir)
     raise ValueError(stage)
 
 
@@ -82,14 +90,17 @@ def main(argv: list[str]) -> int:
             return 1
 
     if metrics_csv is not None or logfile is not None:
-        if stage not in ('pretrain', 'joint'):
-            print('--metrics-csv/--logfile requires --stage pretrain or joint')
+        if stage not in ('pretrain', 'joint', 'vi_only'):
+            print('--metrics-csv/--logfile requires --stage pretrain, joint, or vi_only')
             return 1
         if metrics_csv is not None:
             plot_dir = metrics_csv.parent / 'figures' / f'{stage}_{metrics_csv.stem}'
             if stage == 'pretrain':
                 metrics = load_pretrain_metrics(metrics_csv, logfile)
                 saved = plot_pretrain_metrics(metrics, plot_dir)
+            elif stage == 'vi_only':
+                metrics = load_vi_only_metrics(metrics_csv, logfile)
+                saved = plot_vi_only_metrics(metrics, plot_dir)
             else:
                 metrics = load_joint_metrics(metrics_csv, logfile)
                 saved = plot_joint_metrics(metrics, plot_dir)
@@ -98,6 +109,9 @@ def main(argv: list[str]) -> int:
             if stage == 'pretrain':
                 metrics = load_pretrain_metrics(None, logfile)
                 saved = plot_pretrain_metrics(metrics, plot_dir)
+            elif stage == 'vi_only':
+                metrics = load_vi_only_metrics(None, logfile)
+                saved = plot_vi_only_metrics(metrics, plot_dir)
             else:
                 metrics = load_joint_metrics(None, logfile)
                 saved = plot_joint_metrics(metrics, plot_dir)
@@ -113,7 +127,7 @@ def main(argv: list[str]) -> int:
         print(usage)
         return 1
 
-    if stage not in ('all', 'pretrain', 'joint'):
+    if stage not in ('all', 'pretrain', 'joint', 'vi_only'):
         print(f'Unknown stage: {stage}')
         return 1
     stages = ('pretrain', 'joint') if stage == 'all' else (stage,)

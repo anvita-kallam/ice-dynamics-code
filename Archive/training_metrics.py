@@ -78,6 +78,20 @@ JOINT_FIELDS = (
     'rh_max',
 )
 
+# VI-only CSV columns (frozen PINN + spatial-η diagnostics).
+VI_ONLY_FIELDS = JOINT_FIELDS + (
+    'kernel_amplitude',
+    'kernel_length_scale',
+    'kernel_length_scale_x',
+    'kernel_length_scale_y',
+    'num_inducing',
+    'eta_post_var_mean',
+    'eta_post_std_mean',
+    'eta_post_std_p90',
+    'calibration_within_1sigma',
+    'calibration_within_2sigma',
+)
+
 DEBUG_FIELD_RE = re.compile(r'(\w+)=\[([\d.eE+-]+),([\d.eE+-]+)\]')
 
 _LOG_FLOAT = r'(?:[\d.eE+-]+|nan|inf|-inf)'
@@ -153,6 +167,7 @@ def read_plot_paths_from_cfg(cfgfile: str | Path) -> dict[str, CfgPlotSection]:
     return {
         'pretrain': section_paths('pretrain', 'logs/log_pretrain_torch'),
         'joint': section_paths('train', 'logs/log_train_torch'),
+        'vi_only': section_paths('train', 'logs/log_train_vi_only_torch'),
     }
 
 
@@ -719,6 +734,78 @@ def display_joint_metrics(metrics: dict[str, np.ndarray]) -> list[plt.Figure]:
     return [fig for _, fig in iter_joint_figures(metrics)]
 
 
+def iter_vi_only_figures(metrics: dict[str, np.ndarray]):
+    """VI-only plots: ELBO, η recovery, kernel length scales, posterior std."""
+    metrics = _enrich_joint_metrics(metrics)
+    epoch = metrics.get('epoch')
+    if epoch is None or epoch.size == 0:
+        return
+
+    yield from iter_joint_figures(metrics)
+
+    # Kernel length scales + amplitude
+    if np.any(np.isfinite(metrics.get('kernel_length_scale', np.array([np.nan])))):
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+        for key, label in (
+            ('kernel_length_scale', 'ls (iso/geom)'),
+            ('kernel_length_scale_x', 'ls_x'),
+            ('kernel_length_scale_y', 'ls_y'),
+        ):
+            values = metrics.get(key)
+            if values is None:
+                continue
+            mask = np.isfinite(values)
+            if mask.any():
+                axes[0].plot(epoch[mask], values[mask], label=label)
+        axes[0].set_xlabel('epoch')
+        axes[0].set_ylabel('length scale (normalized)')
+        axes[0].set_title('VI-only — kernel length scales')
+        axes[0].legend(fontsize=8)
+        axes[0].grid(True, alpha=0.3)
+        amp = metrics.get('kernel_amplitude')
+        if amp is not None:
+            mask = np.isfinite(amp)
+            if mask.any():
+                axes[1].plot(epoch[mask], amp[mask], color='tab:purple')
+        axes[1].set_xlabel('epoch')
+        axes[1].set_ylabel('amplitude')
+        axes[1].set_title('VI-only — kernel amplitude')
+        axes[1].grid(True, alpha=0.3)
+        fig.tight_layout()
+        yield 'kernel_params', fig
+
+    # Posterior uncertainty
+    if np.any(np.isfinite(metrics.get('eta_post_std_mean', np.array([np.nan])))):
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        for key, label in (
+            ('eta_post_std_mean', 'mean θ std'),
+            ('eta_post_std_p90', 'p90 θ std'),
+            ('calibration_within_1sigma', 'frac within 1σ'),
+            ('calibration_within_2sigma', 'frac within 2σ'),
+        ):
+            values = metrics.get(key)
+            if values is None:
+                continue
+            mask = np.isfinite(values)
+            if mask.any():
+                ax.plot(epoch[mask], values[mask], label=label)
+        ax.set_xlabel('epoch')
+        ax.set_title('VI-only — posterior uncertainty / calibration')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        yield 'posterior_uncertainty', fig
+
+
+def plot_vi_only_metrics(metrics: dict[str, np.ndarray], plot_dir: str | Path) -> list[Path]:
+    plot_dir = Path(plot_dir)
+    saved: list[Path] = []
+    for name, fig in iter_vi_only_figures(metrics):
+        path = plot_dir / f'{name}.png'
+        _save_figure(fig, path)
+        saved.append(path)
+    return saved
+
+
 def plot_pretrain_metrics(metrics: dict[str, np.ndarray], plot_dir: str | Path) -> list[Path]:
     plot_dir = Path(plot_dir)
     saved: list[Path] = []
@@ -755,6 +842,14 @@ def load_joint_metrics(csv_path: str | Path | None, logfile: str | Path | None) 
     return _rows_to_arrays([], JOINT_FIELDS)
 
 
+def load_vi_only_metrics(csv_path: str | Path | None, logfile: str | Path | None) -> dict[str, np.ndarray]:
+    if csv_path is not None and Path(csv_path).exists():
+        return load_metrics_csv(csv_path, VI_ONLY_FIELDS)
+    if logfile is not None and Path(logfile).exists():
+        return parse_joint_log(logfile)
+    return _rows_to_arrays([], VI_ONLY_FIELDS)
+
+
 def maybe_plot_training(
     stage: str,
     metrics_csv: str | Path,
@@ -774,6 +869,9 @@ def maybe_plot_training(
         if stage == 'joint':
             metrics = load_joint_metrics(metrics_csv, logfile)
             return plot_joint_metrics(metrics, plot_dir)
+        if stage == 'vi_only':
+            metrics = load_vi_only_metrics(metrics_csv, logfile)
+            return plot_vi_only_metrics(metrics, plot_dir)
         raise ValueError(f'unknown training stage: {stage}')
     except Exception as exc:
         # Never abort training because plotting/metrics parsing failed.

@@ -1,0 +1,15 @@
+{
+  "base_cfg": "run_torch_vi_only.cfg",
+  "output_dir": "configs/vi_only_sweeps",
+  "submit": false,
+  "grid": {
+    "train.eta_prior_scale": [0.05, 0.08, 0.15],
+    "prior.kl_eta": [0.05, 0.15],
+    "train.vgp_eta_lr": [5.0e-4, 1.0e-3],
+    "prior.kernel_type": ["rbf", "matern32"],
+    "prior.num_inducing_x": [24],
+    "prior.num_inducing_y": [24],
+    "prior.anisotropic": [false],
+    "train.vgp_optimizer": ["adamw"]
+  }
+}

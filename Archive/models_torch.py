@@ -276,12 +276,20 @@ class SparseVariationalGP(nn.Module):
     This implementation exposes predictive mean/stddev for local batches and an
     inducing-space KL term that is stable under DDP. That KL is intentionally not
     the original batch-point KL used by the TensorFlow code.
+
+    Optional kernel knobs (defaults preserve the historical RBF isotropic GP used
+    by joint training):
+      kernel_type: 'rbf' | 'matern12' | 'matern32' | 'matern52'
+      anisotropic: separate length scales in x and y (normalized coords)
+      learnable_length_scale: if False, length-scale params are frozen
     """
 
     def __init__(self, x, y, num_inducing_x, num_inducing_y, norms,
                  trainable_obs_variance=False, amplitude_init=0.2,
                  length_scale_init=0.3, noise_variance_init=1.0e-4,
-                 jitter=1.0e-5, dtype=torch.float64, inducing_placement='ice_fps'):
+                 jitter=1.0e-5, dtype=torch.float64, inducing_placement='ice_fps',
+                 kernel_type='rbf', anisotropic=False, learnable_length_scale=True,
+                 length_scale_y_init=None):
         super().__init__()
         X_phys = build_inducing_points_physical(
             x, y, num_inducing_x, num_inducing_y, placement=inducing_placement)
@@ -290,15 +298,36 @@ class SparseVariationalGP(nn.Module):
 
         self.register_buffer('inducing_index_points', torch.tensor(X_ind, dtype=dtype))
         self.raw_amplitude = nn.Parameter(torch.tensor(math.log(amplitude_init), dtype=dtype))
-        self.raw_length_scale = nn.Parameter(torch.tensor(math.log(length_scale_init), dtype=dtype))
+        self.kernel_type = str(kernel_type or 'rbf').strip().lower()
+        self.anisotropic = bool(anisotropic)
+        self.jitter = jitter
+        self.inducing_placement = str(inducing_placement)
+
+        ls_x = float(length_scale_init)
+        ls_y = float(length_scale_y_init if length_scale_y_init is not None else length_scale_init)
+        if self.anisotropic:
+            self.raw_length_scale_x = nn.Parameter(torch.tensor(math.log(ls_x), dtype=dtype))
+            self.raw_length_scale_y = nn.Parameter(torch.tensor(math.log(ls_y), dtype=dtype))
+            # Keep an unused isotropic buffer for checkpoint compatibility with older loads.
+            self.register_parameter(
+                'raw_length_scale',
+                nn.Parameter(torch.tensor(math.log(ls_x), dtype=dtype), requires_grad=False))
+        else:
+            self.raw_length_scale = nn.Parameter(torch.tensor(math.log(ls_x), dtype=dtype))
+
+        if not learnable_length_scale:
+            if self.anisotropic:
+                self.raw_length_scale_x.requires_grad_(False)
+                self.raw_length_scale_y.requires_grad_(False)
+            else:
+                self.raw_length_scale.requires_grad_(False)
+
         self.raw_noise_variance = nn.Parameter(
             torch.tensor(math.log(noise_variance_init), dtype=dtype),
             requires_grad=trainable_obs_variance
         )
         self.variational_inducing_loc = nn.Parameter(torch.zeros(num_inducing, dtype=dtype))
         self.raw_variational_inducing_scale = nn.Parameter(torch.eye(num_inducing, dtype=dtype))
-        self.jitter = jitter
-        self.inducing_placement = str(inducing_placement)
 
     @property
     def amplitude(self):
@@ -306,6 +335,21 @@ class SparseVariationalGP(nn.Module):
 
     @property
     def length_scale(self):
+        """Isotropic length scale (or geometric mean if anisotropic)."""
+        if self.anisotropic:
+            return torch.sqrt(torch.exp(self.raw_length_scale_x) * torch.exp(self.raw_length_scale_y))
+        return torch.exp(self.raw_length_scale)
+
+    @property
+    def length_scale_x(self):
+        if self.anisotropic:
+            return torch.exp(self.raw_length_scale_x)
+        return torch.exp(self.raw_length_scale)
+
+    @property
+    def length_scale_y(self):
+        if self.anisotropic:
+            return torch.exp(self.raw_length_scale_y)
         return torch.exp(self.raw_length_scale)
 
     @property
@@ -317,11 +361,49 @@ class SparseVariationalGP(nn.Module):
         diag = F.softplus(torch.diagonal(self.raw_variational_inducing_scale)) + self.jitter
         return lower + torch.diag(diag)
 
-    def kernel(self, xa, xb):
+    def _pairwise_dist_sq(self, xa, xb):
+        if self.anisotropic:
+            lx = self.length_scale_x.clamp_min(1.0e-12)
+            ly = self.length_scale_y.clamp_min(1.0e-12)
+            dx = (xa[:, 0:1] - xb[:, 0:1].T) / lx
+            dy = (xa[:, 1:2] - xb[:, 1:2].T) / ly
+            return dx.square() + dy.square()
         xa_sq = (xa ** 2).sum(dim=1, keepdim=True)
         xb_sq = (xb ** 2).sum(dim=1, keepdim=True).T
         dist_sq = xa_sq + xb_sq - 2.0 * xa @ xb.T
-        return self.amplitude.square() * torch.exp(-0.5 * dist_sq / self.length_scale.square())
+        ls = self.length_scale.clamp_min(1.0e-12)
+        return dist_sq / ls.square()
+
+    def kernel(self, xa, xb):
+        # dist_sq is already scaled by length-scale(s) (Mahalanobis / isotropic).
+        dist_sq = self._pairwise_dist_sq(xa, xb).clamp_min(0.0)
+        amp2 = self.amplitude.square()
+        kind = self.kernel_type
+        if kind in ('rbf', 'sqexp', 'squared_exponential'):
+            return amp2 * torch.exp(-0.5 * dist_sq)
+        r = torch.sqrt(dist_sq + 1.0e-18)
+        if kind in ('matern12', 'matern_12', 'exponential'):
+            return amp2 * torch.exp(-r)
+        if kind in ('matern32', 'matern_32'):
+            sqrt3 = math.sqrt(3.0)
+            return amp2 * (1.0 + sqrt3 * r) * torch.exp(-sqrt3 * r)
+        if kind in ('matern52', 'matern_52'):
+            sqrt5 = math.sqrt(5.0)
+            return amp2 * (1.0 + sqrt5 * r + (5.0 / 3.0) * dist_sq) * torch.exp(-sqrt5 * r)
+        raise ValueError(
+            f"Unknown kernel_type={kind!r}; use 'rbf', 'matern12', 'matern32', or 'matern52'")
+
+    def kernel_diagnostics(self):
+        """Scalar kernel hyperparameters for logging (Python floats)."""
+        return {
+            'kernel_type': self.kernel_type,
+            'anisotropic': float(self.anisotropic),
+            'amplitude': float(self.amplitude.detach().cpu().item()),
+            'length_scale': float(self.length_scale.detach().cpu().item()),
+            'length_scale_x': float(self.length_scale_x.detach().cpu().item()),
+            'length_scale_y': float(self.length_scale_y.detach().cpu().item()),
+            'num_inducing': int(self.inducing_index_points.shape[0]),
+        }
 
     def _kzz_chol(self):
         z = self.inducing_index_points
@@ -440,8 +522,68 @@ class SparseVariationalGP(nn.Module):
 
             self.variational_inducing_loc.zero_()
             self.raw_variational_inducing_scale.copy_(raw)
-            
-class JointModel(nn.Module):
+
+
+def make_sparse_vgp(x_ref, y_ref, norms, pars, field, dtype):
+    """Build SparseVariationalGP from config; used by VI-only (+ predict) paths."""
+    if field == 'eta':
+        amp = pars.prior.std_eta
+        ls_m = pars.prior.l_scale_eta
+        ls_y_m = getattr(pars.prior, 'l_scale_eta_y', None)
+    else:
+        amp = pars.prior.std_lambda
+        ls_m = pars.prior.l_scale_lambda
+        ls_y_m = getattr(pars.prior, 'l_scale_lambda_y', None)
+
+    def _norm_ls(length_m):
+        dx = float(norms['x'].denom)
+        dy = float(norms['y'].denom)
+        domain = math.sqrt(dx * dy)
+        return 2.0 * float(length_m) / domain
+
+    ls = _norm_ls(ls_m)
+    ls_y = _norm_ls(ls_y_m) if ls_y_m is not None else None
+    return SparseVariationalGP(
+        x_ref, y_ref,
+        pars.prior.num_inducing_x, pars.prior.num_inducing_y, norms,
+        trainable_obs_variance=pars.likelihood.trainable_obs_variance,
+        amplitude_init=amp,
+        length_scale_init=ls,
+        length_scale_y_init=ls_y,
+        dtype=dtype,
+        inducing_placement=getattr(pars.prior, 'inducing_placement', 'ice_fps'),
+        kernel_type=getattr(pars.prior, 'kernel_type', 'rbf'),
+        anisotropic=bool(getattr(pars.prior, 'anisotropic', False)),
+        learnable_length_scale=bool(getattr(pars.prior, 'learnable_length_scale', True)),
+    )
+
+
+class VariationalNaturalGradient:
+    """Approximate natural-gradient updates for sparse-GP variational mean.
+
+    Uses the current variational covariance S as a Fisher preconditioner:
+        m <- m - lr * (S @ grad_m)
+    Kernel / Cholesky scale parameters are left to a standard optimizer (AdamW).
+    """
+
+    def __init__(self, vgp_modules, learning_rate=1.0e-2):
+        self.vgps = list(vgp_modules)
+        self.lr = float(learning_rate)
+
+    def zero_grad(self):
+        for vgp in self.vgps:
+            if vgp.variational_inducing_loc.grad is not None:
+                vgp.variational_inducing_loc.grad = None
+
+    @torch.no_grad()
+    def step(self):
+        for vgp in self.vgps:
+            g = vgp.variational_inducing_loc.grad
+            if g is None:
+                continue
+            scale_tril = vgp.variational_scale_tril()
+            S = scale_tril @ scale_tril.T
+            vgp.variational_inducing_loc.add_(-self.lr * (S @ g))
 
     def __init__(self, mean_net, vgp_eta, vgp_lambda, dtype=None, mean_net_ref=None):
         super().__init__()
@@ -955,6 +1097,8 @@ def create_optimizer(optname, parameters, learning_rate=0.0005, **kwargs):
     }
     if name == 'adam':
         return torch.optim.Adam(parameters, lr=learning_rate, **kwargs)
+    if name == 'adamw':
+        return torch.optim.AdamW(parameters, lr=learning_rate, **kwargs)
     if name == 'sgd':
         return torch.optim.SGD(parameters, lr=learning_rate, momentum=0.8, **kwargs)
     if name in ('lbfgs', 'l-bfgs'):
