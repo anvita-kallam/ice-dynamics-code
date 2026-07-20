@@ -585,6 +585,9 @@ class VariationalNaturalGradient:
             S = scale_tril @ scale_tril.T
             vgp.variational_inducing_loc.add_(-self.lr * (S @ g))
 
+
+class JointModel(nn.Module):
+
     def __init__(self, mean_net, vgp_eta, vgp_lambda, dtype=None, mean_net_ref=None):
         super().__init__()
         self.mean_net = mean_net
