@@ -67,24 +67,50 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _restore_masked_field(
+    values: np.ndarray,
+    grid_shape: tuple[int, ...],
+    geom_mask: np.ndarray,
+    name: str,
+) -> np.ndarray:
+    """Restore either a full-grid or geometry-masked vector to the reference grid."""
+    values = np.asarray(values)
+    if values.shape == grid_shape:
+        return values
+    if values.ndim == 1 and values.size == int(geom_mask.sum()):
+        full = np.full(grid_shape, np.nan, dtype=values.dtype)
+        full[geom_mask] = values
+        return full
+    if values.size == int(np.prod(grid_shape)):
+        return values.reshape(grid_shape)
+    raise ValueError(
+        f"Cannot map HDF5 field {name!r} with shape {values.shape} "
+        f"to grid {grid_shape} ({int(geom_mask.sum())} geometry points)"
+    )
+
+
+def _posterior_sample_std(
+    dataset: h5py.Dataset,
+    grid_shape: tuple[int, ...],
+    geom_mask: np.ndarray,
+    chunk_points: int = 8192,
+) -> np.ndarray:
+    """Compute pointwise sample std without loading the entire sample matrix."""
+    if dataset.ndim != 2:
+        raise ValueError(f"eta_samples must be 2-D, got {dataset.shape}")
+    n_points = dataset.shape[1]
+    std = np.empty(n_points, dtype=np.float64)
+    for start in range(0, n_points, chunk_points):
+        stop = min(start + chunk_points, n_points)
+        std[start:stop] = np.std(dataset[:, start:stop], axis=0, ddof=0)
+    return _restore_masked_field(std, grid_shape, geom_mask, "eta_samples std")
+
+
 def load_data(h5_path: Path, npz_path: Path) -> dict:
     if not h5_path.exists():
         raise FileNotFoundError(h5_path)
     if not npz_path.exists():
         raise FileNotFoundError(npz_path)
-
-    with h5py.File(h5_path) as f:
-        x = f["x"][...]
-        y = f["y"][...]
-        geom = f["geom_mask"][...].astype(bool)
-        eta_mean = f["eta_mean"][...]
-        eta_std = f["eta_std"][...]
-        u_hat = f["u_hat"][...]
-        v_hat = f["v_hat"][...]
-        s_hat = f["s_hat"][...] if "s_hat" in f else None
-        h_hat = f["h_hat"][...] if "h_hat" in f else None
-        b_hat = f["b_hat"][...] if "b_hat" in f else None
-        attrs = dict(f.attrs)
 
     with np.load(npz_path) as z:
         eta_ref = z["viscosity"]
@@ -94,6 +120,53 @@ def load_data(h5_path: Path, npz_path: Path) -> dict:
         thickness = z["thickness"] if "thickness" in z.files else None
         bed = z["bed"] if "bed" in z.files else None
         geom_ref = np.isfinite(z["surface"]) & np.isfinite(z["thickness"]) & np.isfinite(z["bed"])
+        if "X" in z.files and "Y" in z.files:
+            x_ref, y_ref = z["X"], z["Y"]
+        elif "x" in z.files and "y" in z.files:
+            x_raw, y_raw = z["x"], z["y"]
+            if x_raw.shape == eta_ref.shape and y_raw.shape == eta_ref.shape:
+                x_ref, y_ref = x_raw, y_raw
+            else:
+                x_ref, y_ref = np.meshgrid(np.ravel(x_raw), np.ravel(y_raw))
+        else:
+            raise KeyError("Reference NPZ must contain X/Y or x/y coordinates")
+
+    grid_shape = eta_ref.shape
+    with h5py.File(h5_path) as f:
+        attrs = dict(f.attrs)
+        is_masked_vi_only = "geom_mask" not in f
+        geom = f["geom_mask"][...].astype(bool) if "geom_mask" in f else geom_ref.copy()
+        x = f["x"][...] if "x" in f else x_ref
+        y = f["y"][...] if "y" in f else y_ref
+
+        def field(primary: str, fallback: str | None = None) -> np.ndarray | None:
+            key = primary if primary in f else fallback
+            if key is None or key not in f:
+                return None
+            return _restore_masked_field(f[key][...], grid_shape, geom, key)
+
+        eta_mean = field("eta_mean")
+        if eta_mean is None:
+            raise KeyError("HDF5 is missing eta_mean")
+        eta_std = field("eta_std")
+        if eta_std is None:
+            if "eta_samples" in f:
+                eta_std = _posterior_sample_std(f["eta_samples"], grid_shape, geom)
+            elif "eta_latent_std" in f:
+                # Delta-method conversion from latent log-η std to physical η std.
+                latent_std = field("eta_latent_std")
+                eta_std = eta_mean * latent_std
+            else:
+                raise KeyError("HDF5 needs eta_std, eta_samples, or eta_latent_std")
+
+        u_hat = field("u_hat", "u")
+        v_hat = field("v_hat", "v")
+        if u_hat is None or v_hat is None:
+            raise KeyError("HDF5 needs u_hat/v_hat or VI-only u/v fields")
+        s_hat = field("s_hat", "s")
+        h_hat = field("h_hat", "h")
+        b_hat = field("b_hat", "b")
+        attrs["source_schema"] = "vi_only_masked" if is_masked_vi_only else "joint_full_grid"
 
     eval_mask = (
         geom
@@ -223,10 +296,17 @@ def save_figures(data: dict, metrics: dict, fig_dir: Path, stride: int) -> list[
         vmin=max(float(np.percentile(eta_vals, 2)), 1e-3),
         vmax=float(np.percentile(eta_vals, 98)),
     )
-    diff_lim = float(np.nanpercentile(np.abs(eta_diff[mask]), 98))
-    diff_lim = max(diff_lim, 1e-6)
-    log_diff_lim = float(np.nanpercentile(np.abs(log_eta_diff[mask]), 98))
-    log_diff_lim = max(log_diff_lim, 1e-3)
+    # Difference panels share the color-scale magnitude of the truth/estimate maps.
+    diff_lim = max(float(eta_norm.vmax), 1e-6)
+    log_vals = np.concatenate(
+        [log_eta_ref[mask].ravel(), log_eta_mean[mask].ravel()]
+    )
+    log_vals = log_vals[np.isfinite(log_vals)]
+    if log_vals.size:
+        log_lo, log_hi = np.percentile(log_vals, [2, 98])
+    else:
+        log_lo, log_hi = -1.0, 1.0
+    log_diff_lim = max(abs(float(log_lo)), abs(float(log_hi)), 1e-3)
 
     fig, axes = plt.subplots(2, 3, figsize=(13.5, 7.2), constrained_layout=True)
     im00 = _add_map(axes[0, 0], x_km, y_km, eta_ref, r"Truth $\eta$ (spin-up)", cmap="magma", norm=eta_norm)
@@ -256,14 +336,8 @@ def save_figures(data: dict, metrics: dict, fig_dir: Path, stride: int) -> list[
         norm=TwoSlopeNorm(vcenter=0.0, vmin=-log_diff_lim, vmax=log_diff_lim),
     )
     # Match log color limits
-    log_vals = np.concatenate(
-        [log_eta_ref[mask].ravel(), log_eta_mean[mask].ravel()]
-    )
-    log_vals = log_vals[np.isfinite(log_vals)]
-    if log_vals.size:
-        lo, hi = np.percentile(log_vals, [2, 98])
-        im10.set_clim(lo, hi)
-        im11.set_clim(lo, hi)
+    im10.set_clim(log_lo, log_hi)
+    im11.set_clim(log_lo, log_hi)
     fig.colorbar(im10, ax=axes[1, 0], fraction=0.046, pad=0.02)
     fig.colorbar(im11, ax=axes[1, 1], fraction=0.046, pad=0.02)
     fig.colorbar(im12, ax=axes[1, 2], fraction=0.046, pad=0.02)

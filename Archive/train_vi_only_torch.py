@@ -180,8 +180,11 @@ def build_vgp_scheduler(optimizer, pars, n_epochs_this_run):
     if kind in ('', 'none', 'null', 'false'):
         return None, kind
     if kind == 'cosine':
+        t_max = int(
+            getattr(pars.train, 'lr_scheduler_t_max', n_epochs_this_run)
+            or n_epochs_this_run)
         return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(int(n_epochs_this_run), 1),
+            optimizer, T_max=max(t_max, 1),
             eta_min=float(getattr(pars.train, 'lr_scheduler_eta_min', 0.0) or 0.0),
         ), kind
     if kind == 'plateau':
@@ -318,10 +321,15 @@ def main(pars):
     torch_dtype = resolve_torch_dtype(pars.runtime.dtype)
     distributed, rank, local_rank, world_size = init_distributed(pars)
     device = choose_device(pars, local_rank)
+    seed = int(getattr(pars.train, 'seed', 0) or 0)
+    np.random.seed(seed + rank)
+    torch.manual_seed(seed + rank)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed + rank)
     setup_logging(pars.train.logfile, rank, append=bool(getattr(pars.train, 'restore', False)))
     if rank == 0:
         logging.info('VI-only training (frozen PINN):\n%s', __import__('pprint').pformat(to_dict(pars), indent=2))
-        logging.info('physics=%s', physics_approximation)
+        logging.info('physics=%s seed=%d', physics_approximation, seed)
 
     obs_train, obs_test, phys_train, phys_test, norms, snapshot = make_joint_datasets(pars, torch_dtype)
     obs_train_loader = create_loader(
@@ -396,9 +404,13 @@ def main(pars):
     )
     Path(pars.train.checkdir).mkdir(parents=True, exist_ok=True)
 
-    n_additional_epochs = int(pars.train.n_epochs)
+    # VI-only n_epochs is an absolute target so a Slurm requeue cannot silently
+    # add another full training run.
+    target_epochs = int(pars.train.n_epochs)
+    if target_epochs < 0:
+        raise ValueError(f'train.n_epochs must be non-negative, got {target_epochs}')
     start_epoch = 0
-    stop_epoch = start_epoch + n_additional_epochs
+    stop_epoch = target_epochs
     if pars.train.restore:
         if not Path(ckpt_file_old).exists():
             raise FileNotFoundError(f'train.restore=True but checkpoint missing: {ckpt_file_old}')
@@ -420,15 +432,17 @@ def main(pars):
                     logging.warning('Skipping optimizer_vgp restore: %s', exc)
         completed = int(state.get('epoch', -1))
         start_epoch = completed + 1
-        stop_epoch = start_epoch + n_additional_epochs
         if rank == 0:
-            logging.info('restored vi-only checkpoint %s (resume epoch %d)', ckpt_file_old, start_epoch)
+            logging.info(
+                'restored vi-only checkpoint %s (resume epoch %d, absolute stop=%d)',
+                ckpt_file_old, start_epoch, stop_epoch)
 
     grid_np, weights_np = np.polynomial.hermite.hermgauss(pars.train.quadrature_size)
     grid = torch.tensor(grid_np, device=device, dtype=torch_dtype)
     weights = torch.tensor(weights_np / np.sqrt(np.pi), device=device, dtype=torch_dtype)
 
-    scheduler, scheduler_kind = build_vgp_scheduler(optimizer_vgp, pars, n_additional_epochs)
+    scheduler, scheduler_kind = build_vgp_scheduler(
+        optimizer_vgp, pars, max(stop_epoch - start_epoch, 1))
     last_test = [float('nan')] * 6
     last_eta_metrics = None
     steps_this_epoch = max(len(obs_train_loader), len(phys_train_loader))

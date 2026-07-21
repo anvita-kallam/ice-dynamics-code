@@ -1,0 +1,91 @@
+{
+  "suite_id": "eta_bias_v1",
+  "base_cfg": "run_torch_vi_only_optimized.cfg",
+  "correlation_gate": 0.82,
+  "experiments": [
+    {
+      "id": "control_adamw",
+      "description": "Fresh repeat of the current optimized recipe.",
+      "overrides": {}
+    },
+    {
+      "id": "weak_prior",
+      "description": "Weaker and broader eta anchor plus mildly weaker inducing KL.",
+      "overrides": {
+        "train.eta_prior_scale": 0.03,
+        "train.eta_prior_std": 2.5,
+        "prior.kl_eta": 0.10
+      }
+    },
+    {
+      "id": "raised_prior_center",
+      "description": "Move the eta anchor center from 12 to 15 MPa yr without weakening it.",
+      "overrides": {
+        "prior.eta_init": 15.0
+      }
+    },
+    {
+      "id": "strong_physics",
+      "description": "Increase SSA weight and tighten residual scales while retaining the incumbent prior.",
+      "overrides": {
+        "train.phys_scale": 6.0,
+        "likelihood.ssa_rx_std": 0.05,
+        "likelihood.ssa_ry_std": 0.05,
+        "likelihood.ssa_rh_std": 0.05
+      }
+    },
+    {
+      "id": "gp_capacity",
+      "description": "32x32 inducing points, Matern-5/2, and learnable anisotropic length scales.",
+      "overrides": {
+        "prior.num_inducing_x": 32,
+        "prior.num_inducing_y": 32,
+        "prior.kernel_type": "matern52",
+        "prior.anisotropic": true,
+        "prior.l_scale_eta_y": 7500.0,
+        "train.n_epochs": 200,
+        "train.early_stop_patience": 12
+      }
+    },
+    {
+      "id": "optimizer_ngd",
+      "description": "AdamW for covariance/kernel parameters plus natural gradients for variational means.",
+      "overrides": {
+        "train.vgp_optimizer": "adamw_ngd",
+        "train.vgp_ngd_lr": 0.003
+      }
+    },
+    {
+      "id": "optimizer_fast_cosine",
+      "description": "More aggressive AdamW learning rate with a shorter cosine schedule.",
+      "overrides": {
+        "train.vgp_eta_lr": 0.0005,
+        "train.eta_shift_lr": 0.0005,
+        "train.lr_scheduler_t_max": 160,
+        "train.n_epochs": 220,
+        "train.early_stop_patience": 16
+      }
+    },
+    {
+      "id": "combined_candidate",
+      "description": "Candidate production recipe: raised center, weaker prior/KL, stronger physics, and higher GP capacity.",
+      "overrides": {
+        "prior.eta_init": 15.0,
+        "prior.kl_eta": 0.10,
+        "prior.num_inducing_x": 32,
+        "prior.num_inducing_y": 32,
+        "prior.kernel_type": "matern52",
+        "prior.anisotropic": true,
+        "prior.l_scale_eta_y": 7500.0,
+        "train.eta_prior_scale": 0.04,
+        "train.eta_prior_std": 2.5,
+        "train.phys_scale": 6.0,
+        "likelihood.ssa_rx_std": 0.05,
+        "likelihood.ssa_ry_std": 0.05,
+        "likelihood.ssa_rh_std": 0.05,
+        "train.n_epochs": 200,
+        "train.early_stop_patience": 12
+      }
+    }
+  ]
+}

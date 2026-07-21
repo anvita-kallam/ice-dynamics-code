@@ -18,30 +18,57 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+import predict_torch as _predict
 from models_torch import JointModel, MeanNetwork, make_sparse_vgp, normalize_tensor
 from train_vi_only_torch import VI_ONLY_ARCHITECTURE
 from utilities_torch import (
     ParameterClass,
     checkpoint_path,
+    flatten_snapshot,
     load_snapshot,
     make_normalizers,
+    resolve_np_dtype,
     resolve_torch_dtype,
     torch_load_checkpoint,
 )
 
 usage = """
-Usage: evaluate_vi_only_posterior.py run_torch_vi_only.cfg [--tag name]
+Usage: evaluate_vi_only_posterior.py CONFIG [--tag NAME] [--output-dir DIR]
+       [--checkpoint best|latest|PATH] [--no-plots]
 """
+
+
+def _rank_correlation(x, y):
+    """Dependency-free Spearman correlation (ties are negligible for these fields)."""
+    x_rank = np.empty(len(x), dtype=float)
+    y_rank = np.empty(len(y), dtype=float)
+    x_rank[np.argsort(x, kind='mergesort')] = np.arange(len(x), dtype=float)
+    y_rank[np.argsort(y, kind='mergesort')] = np.arange(len(y), dtype=float)
+    return float(np.corrcoef(x_rank, y_rank)[0, 1])
+
+
+def _rmse(pred, truth, mask):
+    valid = np.asarray(mask, dtype=bool) & np.isfinite(pred) & np.isfinite(truth)
+    return float(np.sqrt(np.mean((pred[valid] - truth[valid]) ** 2)))
 
 
 def main(argv):
     tag = 'more_sliding'
     args = list(argv)
     cfg = None
+    output_dir = None
+    checkpoint_choice = 'best'
+    make_plots = True
     while args:
         tok = args.pop(0)
         if tok == '--tag' and args:
             tag = args.pop(0)
+        elif tok == '--output-dir' and args:
+            output_dir = Path(args.pop(0))
+        elif tok == '--checkpoint' and args:
+            checkpoint_choice = args.pop(0)
+        elif tok == '--no-plots':
+            make_plots = False
         elif cfg is None and not tok.startswith('-'):
             cfg = tok
         else:
@@ -68,7 +95,13 @@ def main(argv):
         make_sparse_vgp(x_ref, y_ref, norms, pars, 'lambda', torch_dtype),
         dtype=torch_dtype,
     ).to(device)
-    ckpt = checkpoint_path(pars.train.checkdir, pars.train.checkname_new)
+    if checkpoint_choice == 'best':
+        ckpt_name = str(getattr(pars.train, 'checkname_best', 'model_best') or 'model_best')
+        ckpt = checkpoint_path(pars.train.checkdir, ckpt_name)
+    elif checkpoint_choice == 'latest':
+        ckpt = checkpoint_path(pars.train.checkdir, pars.train.checkname_new)
+    else:
+        ckpt = checkpoint_choice
     state = torch_load_checkpoint(ckpt, map_location=device)
     if state.get('architecture') != VI_ONLY_ARCHITECTURE:
         raise RuntimeError(f'Expected VI-only architecture, got {state.get("architecture")!r}')
@@ -96,24 +129,82 @@ def main(argv):
     eta_ref = snapshot.viscosity[ys, xs].astype(float)
     log_err = np.log10(eta_mean) - np.log10(eta_ref)
     log10_std = std / math.log(10.0)
+    abs_log_err = np.abs(log_err)
+    rel_err = (eta_mean - eta_ref) / eta_ref
+
+    arrays = flatten_snapshot(
+        snapshot, norms, pars.prior.thickness_min,
+        np_dtype=resolve_np_dtype(pars.runtime.dtype))
+    state_pred = _predict._batched_mean_predictions(
+        model.mean_net, arrays, pars.predict.batch_size,
+        pars.prior.thickness_min, device, torch_dtype)
+    geom_flat = snapshot.geom_mask
+    uv_flat = snapshot.uv_mask[geom_flat]
+    state_truth = {
+        'u': snapshot.u[geom_flat],
+        'v': snapshot.v[geom_flat],
+        's': snapshot.s[geom_flat],
+        'h': snapshot.h[geom_flat],
+        'b': snapshot.b[geom_flat],
+    }
+    state_masks = {
+        'u': uv_flat,
+        'v': uv_flat,
+        's': np.ones(int(geom_flat.sum()), dtype=bool),
+        'h': np.ones(int(geom_flat.sum()), dtype=bool),
+        'b': np.ones(int(geom_flat.sum()), dtype=bool),
+    }
+    state_rmse = {}
+    state_nrmse_terms = []
+    for name in ('u', 'v', 's', 'h', 'b'):
+        pred = np.asarray(state_pred[name]).reshape(-1)
+        truth = np.asarray(state_truth[name]).reshape(-1)
+        valid = state_masks[name] & np.isfinite(pred) & np.isfinite(truth)
+        value = _rmse(pred, truth, valid)
+        state_rmse[name] = value
+        ref_std = float(np.std(truth[valid]))
+        if ref_std > 0.0:
+            state_nrmse_terms.append(value / ref_std)
+
     summary = {
+        'config': str(cfg),
         'checkpoint': ckpt,
+        'checkpoint_epoch': int(state.get('epoch', -1)),
         'n_points': int(eta_mean.size),
         'log10_eta_rmse': float(np.sqrt(np.mean(log_err ** 2))),
         'log10_eta_bias': float(np.mean(log_err)),
         'log10_eta_r': float(np.corrcoef(np.log10(eta_mean), np.log10(eta_ref))[0, 1]),
+        'rel_eta_rmse': float(np.sqrt(np.mean(rel_err ** 2))),
         'eta_pred_mean': float(np.mean(eta_mean)),
         'eta_ref_mean': float(np.mean(eta_ref)),
+        'eta_mean_ratio': float(np.mean(eta_mean) / np.mean(eta_ref)),
+        'eta_post_var_mean': float(np.mean(std ** 2)),
         'eta_post_std_mean': float(np.mean(std)),
+        'eta_post_std_median': float(np.median(std)),
+        'eta_post_std_p90': float(np.percentile(std, 90)),
+        'log10_eta_post_std_mean': float(np.mean(log10_std)),
+        'uncertainty_abs_error_spearman': _rank_correlation(log10_std, abs_log_err),
         'calibration_within_1sigma': float(np.mean(np.abs(log_err) <= log10_std)),
         'calibration_within_2sigma': float(np.mean(np.abs(log_err) <= 2.0 * log10_std)),
+        'state_rmse': state_rmse,
+        'state_nrmse': float(np.mean(state_nrmse_terms)),
         'kernel': model.vgp_eta.kernel_diagnostics(),
         'mean_equals_map_note': 'Gaussian variational posterior: mean(θ) used as MAP proxy',
     }
 
-    out_dir = Path('outputs/figures/vi_only') / tag
+    configured_evaldir = getattr(pars.train, 'evaldir', None)
+    out_dir = output_dir or (
+        Path(str(configured_evaldir)) if configured_evaldir
+        else Path('outputs/figures/vi_only') / tag)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / 'posterior_summary.json').write_text(json.dumps(summary, indent=2))
+    summary_path = out_dir / 'posterior_summary.json'
+    tmp_summary = summary_path.with_suffix('.json.tmp')
+    tmp_summary.write_text(json.dumps(summary, indent=2))
+    tmp_summary.replace(summary_path)
+
+    if not make_plots:
+        print(json.dumps(summary, indent=2))
+        return 0
 
     # Scatter: uncertainty vs |error|
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))

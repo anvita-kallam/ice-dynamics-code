@@ -1,0 +1,51 @@
+{
+  "estimator": "exp(E[log eta]); latent posterior std in log10 eta",
+  "joint": {
+    "log10_eta_rmse": 0.2919020961278088,
+    "log10_eta_bias": -0.14912959759954733,
+    "log10_eta_r": 0.6814349351329603,
+    "rel_eta_rmse": 0.5161195758803347,
+    "eta_pred_mean": 8.708495095124302,
+    "eta_ref_mean": 14.901605176951552,
+    "calibration_within_1sigma": 0.45494348844313204,
+    "calibration_within_2sigma": 0.7143051090714262
+  },
+  "sequential": {
+    "log10_eta_rmse": 0.2740978358367883,
+    "log10_eta_bias": -0.17673759192312552,
+    "log10_eta_r": 0.8307059268949882,
+    "rel_eta_rmse": 0.43844852492701075,
+    "eta_pred_mean": 8.30941650280698,
+    "eta_ref_mean": 14.901605176951552,
+    "calibration_within_1sigma": 0.7749332092067048,
+    "calibration_within_2sigma": 1.0
+  },
+  "comparison": {
+    "n_common_points": 206241,
+    "fraction_sequential_lower_abs_log_error": 0.6079877424954301,
+    "rmse_reduction_fraction": 0.06099394463829044,
+    "correlation_gain": 0.14927099176202796
+  },
+  "state_rmse": {
+    "u": {
+      "joint": 0.610851929445193,
+      "sequential": 0.6075231481224121
+    },
+    "v": {
+      "joint": 0.6268087382138863,
+      "sequential": 0.5703308744332904
+    },
+    "surface": {
+      "joint": 0.6356961219340501,
+      "sequential": 0.5903712823612188
+    },
+    "thickness": {
+      "joint": 1.198003495696645,
+      "sequential": 1.0781810833159025
+    },
+    "bed": {
+      "joint": 163.02311298682184,
+      "sequential": 162.99549945122422
+    }
+  }
+}
