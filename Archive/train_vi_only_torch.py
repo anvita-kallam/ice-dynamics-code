@@ -282,14 +282,17 @@ class EarlyStopper:
         self.best = None
         self.bad_epochs = 0
         self.should_stop = False
+        self.improved = False
 
     def step(self, value):
+        self.improved = False
         if value is None or not math.isfinite(float(value)):
             return False
         value = float(value)
         if self.best is None:
             self.best = value
             self.bad_epochs = 0
+            self.improved = True
             return False
         improved = (
             value > self.best + self.min_delta if self.mode == 'max'
@@ -297,6 +300,7 @@ class EarlyStopper:
         if improved:
             self.best = value
             self.bad_epochs = 0
+            self.improved = True
             return False
         self.bad_epochs += 1
         if self.bad_epochs >= self.patience:
@@ -386,6 +390,10 @@ def main(pars):
 
     ckpt_file_old = checkpoint_path(pars.train.checkdir, pars.train.checkname_old)
     ckpt_file_new = checkpoint_path(pars.train.checkdir, pars.train.checkname_new)
+    ckpt_file_best = checkpoint_path(
+        pars.train.checkdir,
+        str(getattr(pars.train, 'checkname_best', 'model_best') or 'model_best'),
+    )
     Path(pars.train.checkdir).mkdir(parents=True, exist_ok=True)
 
     n_additional_epochs = int(pars.train.n_epochs)
@@ -429,12 +437,17 @@ def main(pars):
 
     early_metric = str(getattr(pars.train, 'early_stop_metric', '') or '').strip().lower()
     early_patience = int(getattr(pars.train, 'early_stop_patience', 0) or 0)
+    early_min_delta = float(getattr(pars.train, 'early_stop_min_delta', 0.0) or 0.0)
     early_stopper = None
     if early_metric and early_patience > 0:
         mode = 'min' if early_metric in ('rmse', 'log10_eta_rmse', 'elbo', 'test_total', 'val_elbo') else 'max'
-        early_stopper = EarlyStopper(early_metric, early_patience, mode=mode)
+        early_stopper = EarlyStopper(
+            early_metric, early_patience, mode=mode, min_delta=early_min_delta)
         if rank == 0:
-            logging.info('early stopping on %s (patience=%d, mode=%s)', early_metric, early_patience, mode)
+            logging.info(
+                'early stopping on %s (patience=%d evaluations, mode=%s, min_delta=%.3g); '
+                'best checkpoint=%s',
+                early_metric, early_patience, mode, early_min_delta, ckpt_file_best)
 
     if rank == 0:
         kd = raw_model.vgp_eta.kernel_diagnostics()
@@ -535,13 +548,15 @@ def main(pars):
                 exit_for_slurm_requeue()
 
         train_stats = reduce_mean(running[:4] / torch.clamp(running[4], min=1.0), world_size).tolist()
-        if epoch % pars.train.test_every == 0:
+        test_metrics_updated = epoch % pars.train.test_every == 0
+        if test_metrics_updated:
             last_test = evaluate(
                 model, obs_test_loader, phys_test_loader, device, torch_dtype,
                 grid, weights, pars, world_size)
 
         eta_eval_every = int(getattr(pars.train, 'eta_eval_every', 0) or 0)
-        if eta_eval_every > 0 and epoch % eta_eval_every == 0 and rank == 0:
+        eta_metrics_updated = eta_eval_every > 0 and epoch % eta_eval_every == 0
+        if eta_metrics_updated and rank == 0:
             last_eta_metrics = evaluate_eta_posterior(model, snapshot, device, torch_dtype, pars)
 
         train_total = sum(train_stats[:4])
@@ -631,15 +646,26 @@ def main(pars):
                     TRAINING_STAGE, metrics_csv, plot_dir, epoch, plot_every, pars.train.logfile)
 
             if early_stopper is not None:
+                score_updated = False
                 if early_metric in ('log10_eta_r', 'r', 'corr'):
                     score = None if last_eta_metrics is None else last_eta_metrics['log10_eta_r']
+                    score_updated = eta_metrics_updated
                 elif early_metric in ('rmse', 'log10_eta_rmse'):
                     score = None if last_eta_metrics is None else last_eta_metrics['log10_eta_rmse']
+                    score_updated = eta_metrics_updated
                 elif early_metric in ('elbo', 'val_elbo', 'test_total'):
                     score = test_total
+                    score_updated = test_metrics_updated
                 else:
                     score = None if last_eta_metrics is None else last_eta_metrics.get(early_metric)
-                if early_stopper.step(score):
+                    score_updated = eta_metrics_updated
+                should_stop = early_stopper.step(score) if score_updated else False
+                if early_stopper.improved:
+                    atomic_torch_save(payload, ckpt_file_best)
+                    logging.info(
+                        'saved best vi-only checkpoint epoch=%d %s=%.6g: %s',
+                        epoch, early_metric, score, ckpt_file_best)
+                if should_stop:
                     logging.info(
                         'early stopping at epoch %d (metric=%s best=%.6g)',
                         epoch, early_metric, early_stopper.best)

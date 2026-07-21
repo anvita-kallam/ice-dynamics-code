@@ -2,17 +2,23 @@
 
 Two independent pipelines share **models**, **data loading**, and **loss** code but use **separate configs, scripts, checkpoints, and logs**.
 
-| | Joint (existing) | Sequential (new) |
-|---|------------------|------------------|
-| Stage 1 PINN | `pretrain_solution_torch.py` + `run_torch.cfg` | `pretrain_solution_torch.py` + `run_torch_sequential.cfg` |
-| Stage 2 η | `train_torch.py` + `run_torch.cfg` (alternating) | `train_vi_only_torch.py` + `run_torch_vi_only.cfg` (VGP only) |
-| Pretrain ckpt | `checkpoints/torch_pretrain/more_sliding/` | `checkpoints/torch_pretrain/more_sliding_sequential/` |
-| Train ckpt | `checkpoints/torch_joint/more_sliding/` | `checkpoints/torch_vi_only/more_sliding/` |
-| Log | `logs/log_train_torch_more_sliding` | `logs/log_train_vi_only_more_sliding` |
-| Slurm | `slurm/vi_train_more_sliding.sbatch` | `slurm/vi_train_vi_only_more_sliding.sbatch` |
-| Predict | `predict_torch.py` | `predict_vi_only_torch.py` |
-| Eval | validation script | `evaluate_vi_only_posterior.py` |
-| Posterior HDF5 | `outputs/more_sliding_posterior_samples_torch.h5` | `outputs/more_sliding_vi_only_posterior_samples_torch.h5` |
+| | Joint (existing) | Sequential baseline | Sequential optimized |
+|---|------------------|---------------------|----------------------|
+| Stage 1 PINN | `pretrain_solution_torch.py` + `run_torch.cfg` | `pretrain_solution_torch.py` + `run_torch_sequential.cfg` | same sequential pretrain |
+| Stage 2 η | `train_torch.py` + `run_torch.cfg` | `train_vi_only_torch.py` + `run_torch_vi_only.cfg` | `run_torch_vi_only_optimized.cfg` |
+| Pretrain ckpt | `checkpoints/torch_pretrain/more_sliding/` | `checkpoints/torch_pretrain/more_sliding_sequential/` | same |
+| Train ckpt | `checkpoints/torch_joint/more_sliding/` | `checkpoints/torch_vi_only/more_sliding/` (+ archive `more_sliding_baseline_r082/`) | `checkpoints/torch_vi_only/more_sliding_optimized/` (`model_best.pt`) |
+| Log | `logs/log_train_torch_more_sliding` | `logs/log_train_vi_only_more_sliding` | `logs/log_train_vi_only_more_sliding_optimized` |
+| Slurm | `slurm/vi_train_more_sliding.sbatch` | `slurm/vi_train_vi_only_more_sliding.sbatch` (refuses overwrite) | `slurm/vi_train_vi_only_optimized_more_sliding.sbatch` |
+| Predict | `predict_torch.py` | `predict_vi_only_torch.py` | same + optimized cfg |
+| Posterior HDF5 | `outputs/more_sliding_posterior_samples_torch.h5` | `outputs/more_sliding_vi_only_posterior_samples_torch.h5` | `outputs/more_sliding_vi_only_optimized_posterior_samples_torch.h5` |
+
+### Baseline sequential result (job 1141139, preserved)
+
+- Early stop at epoch 100 on `log10_eta_r` (best ≈ **0.826**, final ≈ **0.812**)
+- `log10_bias` ≈ −0.15, `eta_pred_mean` ≈ 8.8 vs `eta_ref_mean` ≈ 15.0
+- Stronger spatial recovery than joint (`log10_r` ≈ 0.74) → η identifiable with frozen PINN
+- Keep `checkpoints/torch_vi_only/more_sliding/`; sbatch auto-archives to `more_sliding_baseline_r082/` before any forced overwrite
 
 ## VI-only spatial-η tooling
 
@@ -49,10 +55,17 @@ python evaluate_vi_only_posterior.py run_torch_vi_only.cfg --tag more_sliding
 
 ```bash
 cd ~/ice-dynamics/Archive
-sbatch slurm/vi_pretrain_sequential_more_sliding.sbatch
-sbatch --dependency=afterok:<PRE_JOBID> slurm/vi_train_vi_only_more_sliding.sbatch
-# joint can run in parallel on another GPU
-sbatch slurm/vi_train_more_sliding.sbatch
+# Stage 1 (done for more_sliding): sequential pretrain
+# sbatch slurm/vi_pretrain_sequential_more_sliding.sbatch
+
+# Optimized Stage 2 (preferred; isolated from baseline)
+sbatch slurm/vi_train_vi_only_optimized_more_sliding.sbatch
+
+# Explicitly archive the completed baseline if not already
+# cp -a checkpoints/torch_vi_only/more_sliding \
+#      checkpoints/torch_vi_only/more_sliding_baseline_r082
+# cp -a logs/log_train_vi_only_more_sliding \
+#      logs/log_train_vi_only_more_sliding_baseline_r082
 ```
 
 ## Frozen PINN assumptions
@@ -65,4 +78,4 @@ sbatch slurm/vi_train_more_sliding.sbatch
 
 ## Interpreting the experiment
 
-If extensive VI-only sweeps still yield `log10_eta_r ≈ 0` with a strong PINN fit, the limitation is likely **identifiability of η under SSA + observations**, not joint-optimization interference.
+Baseline sequential VI-only already recovered **strong spatial η** (`log10_r≈0.82`) with a frozen PINN, while joint training sat near `≈0.74`. That points to **joint-optimization interference**, not pure η non-identifiability under SSA + observations. Further VI-only tuning (optimized cfg) tests whether mean bias and correlation can improve without unfreezing the PINN.
