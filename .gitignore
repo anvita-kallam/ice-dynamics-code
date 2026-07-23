@@ -29,6 +29,10 @@ outputs/**/*.png
 !outputs/figures/vi/
 !outputs/figures/vi/**/
 !outputs/figures/vi/**/*.png
+# Keep Totten observation QC maps in git
+!outputs/figures/real/
+!outputs/figures/real/**/
+!outputs/figures/real/**/*.png
 
 # Real observation grids under data/ (explicitly tracked)
 !data/real/

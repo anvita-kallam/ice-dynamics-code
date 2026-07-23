@@ -1,0 +1,46 @@
+{
+  "created_utc": "2026-07-23T16:33:58.855618+00:00",
+  "input": "data/real/totten/totten_vel_bed_surf_grid_shelf_2022.npz",
+  "output": "data/real/totten/totten_archive_vi_2022.npz",
+  "shape": [
+    318,
+    174
+  ],
+  "bounds_m": {
+    "xmin": 2234250.0,
+    "xmax": 2320750.0,
+    "ymin": -1159750.0,
+    "ymax": -1001250.0
+  },
+  "grid_resolution_m": 500.0,
+  "geom_finite_fraction": 0.47332465842550425,
+  "uv_finite_fraction": 0.47332465842550425,
+  "geom_finite_count": 26190,
+  "uv_finite_count": 26190,
+  "s_minus_bed_h_max_abs": 2.2737367544323206e-13,
+  "speed_m_per_yr": {
+    "min": 13.422628250637358,
+    "max": 2514.492435047868,
+    "median": 860.7689612817056
+  },
+  "cfg_json": {
+    "case_id": "totten_2022_shelf",
+    "source": "data/real/totten/totten_vel_bed_surf_grid_shelf_2022.npz",
+    "year": 2022,
+    "notes": "Totten shelf-grid observations for Archive VI. No viscosity truth. Basal sliding is set via friction_C in Archive/configs/totten VI cfgs (C=100 no_sliding, C=0.001 max_sliding); A/C intentionally omitted from this cfg_json.",
+    "grid_resolution_m": 500.0,
+    "shape_ny_nx": [
+      318,
+      174
+    ]
+  },
+  "sliding_cases": {
+    "note": "Set in VI configs, not in this NPZ",
+    "no_sliding": {
+      "friction_C": 100.0
+    },
+    "max_sliding": {
+      "friction_C": 0.001
+    }
+  }
+}
