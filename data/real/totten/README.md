@@ -53,6 +53,24 @@ python train_vi_only_torch.py configs/totten/run_torch_vi_only_totten_no_sliding
 python train_vi_only_torch.py configs/totten/run_torch_vi_only_totten_max_sliding.cfg
 ```
 
+On DSI Slurm (preferred):
+
+```bash
+cd Archive
+bash slurm/submit_totten_pipeline.sh
+# or: PRE=$(sbatch --parsable slurm/vi_pretrain_totten.sbatch)
+#     sbatch --dependency=afterok:${PRE} slurm/vi_train_vi_only_totten_no_sliding.sbatch
+#     sbatch --dependency=afterok:${PRE} slurm/vi_train_vi_only_totten_max_sliding.sbatch
+```
+
 Both VI configs use `eta_init=15`, `eta_prior_scale=0.08`, `kl_eta=0.15`, and `eta_eval_every=0` (no η scoring / no η early-stop).
 
 QC maps: `outputs/figures/real/totten/`.
+
+## Geometry EDA
+
+```bash
+python scripts/plot_totten_geometry_eda.py
+```
+
+Figures land in `outputs/figures/real/totten/eda/` (overview, grounding/flow, errors, profiles, histograms). Note: in this product `bed == s - h` exactly (ice base, not ocean-floor bathymetry).

@@ -65,3 +65,24 @@ squeue -u $USER
 sacct -j <jobid> --format=JobID,QOS,State,Elapsed,ExitCode
 scancel <jobid>
 ```
+
+## Totten real-data pipeline (two sliding cases)
+
+Shared pretrain, then two VI-only jobs (`friction_C=100` and `0.001`):
+
+```bash
+cd ~/ice-dynamics   # or your clone path
+git pull
+cd Archive
+mkdir -p logs/slurm
+
+# One-shot: pretrain → both VI jobs (VI jobs wait on pretrain)
+bash slurm/submit_totten_pipeline.sh
+
+# Or step by step:
+PRE=$(sbatch --parsable slurm/vi_pretrain_totten.sbatch)
+sbatch --dependency=afterok:${PRE} slurm/vi_train_vi_only_totten_no_sliding.sbatch
+sbatch --dependency=afterok:${PRE} slurm/vi_train_vi_only_totten_max_sliding.sbatch
+```
+
+Requires `../data/real/totten/totten_archive_vi_2022.npz` and conda env `TORCH_ENV=pytorch`.
