@@ -290,7 +290,7 @@ def parse_config_value(value):
 class ParameterClass:
     def __init__(self, cfgfile=None):
         cfg = configparser.ConfigParser(inline_comment_prefixes=('#', ';'))
-        # Preserve key case so friction_C / fluidity_A match models_torch getattr.
+        # Preserve key case so friction_C / fluidity_A / rH_std match cfg spelling.
         cfg.optionxform = str
         cfg.read_string(default_cfg)
         sections = ('runtime', 'data', 'prior', 'likelihood', 'train', 'pretrain', 'predict', 'torch')
@@ -298,6 +298,7 @@ class ParameterClass:
             sub_pars = GenericClass()
             for key, value in cfg[section].items():
                 setattr(sub_pars, key, parse_config_value(value))
+            _sync_case_aliases(sub_pars)
             setattr(self, section, sub_pars)
 
         if cfgfile is not None:
@@ -310,7 +311,16 @@ class ParameterClass:
                     continue
                 for key, value in cfg[section].items():
                     setattr(sub_pars, key, parse_config_value(value))
+                _sync_case_aliases(sub_pars)
                 setattr(self, section, sub_pars)
+
+
+def _sync_case_aliases(sub_pars):
+    """Expose both cfg spelling and lowercase aliases (legacy getattr sites)."""
+    for key, value in list(vars(sub_pars).items()):
+        lower = key.lower()
+        if lower != key and not hasattr(sub_pars, lower):
+            setattr(sub_pars, lower, value)
 
 
 class Normalizer:
