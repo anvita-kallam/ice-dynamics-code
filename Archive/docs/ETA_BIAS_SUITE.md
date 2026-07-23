@@ -4,6 +4,9 @@ This suite searches for better mean-viscosity recovery without sacrificing the
 optimized sequential model's full-grid spatial correlation (`log10_eta_r≈0.831`).
 The incumbent config and checkpoints are never overwritten.
 
+For a plain-language walkthrough with figures, see
+[`ETA_BIAS_TUNING_WALKTHROUGH.md`](ETA_BIAS_TUNING_WALKTHROUGH.md).
+
 ## Runs
 
 | ID | Controlled change |
