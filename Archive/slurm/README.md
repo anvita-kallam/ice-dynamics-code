@@ -86,3 +86,14 @@ sbatch --dependency=afterok:${PRE} slurm/vi_train_vi_only_totten_max_sliding.sba
 ```
 
 Requires `../data/real/totten/totten_archive_vi_2022.npz` and conda env `TORCH_ENV=pytorch`.
+
+After both VI jobs finish, plot η mean/std comparison (no truth needed):
+
+```bash
+cd Archive
+sbatch slurm/plot_totten_sliding_comparison.sbatch
+# or interactively:
+# python plot_totten_sliding_comparison.py --checkpoint latest
+```
+
+Figures: `outputs/figures/vi/totten_sliding_comparison/`.
