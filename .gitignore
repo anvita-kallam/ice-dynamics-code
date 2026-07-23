@@ -30,6 +30,12 @@ outputs/**/*.png
 !outputs/figures/vi/**/
 !outputs/figures/vi/**/*.png
 
+# Real observation grids under data/ (explicitly tracked)
+!data/real/
+!data/real/**/
+!data/real/**/*.npz
+!data/real/**/*.md
+
 # Secrets
 .env
 .env.*

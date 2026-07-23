@@ -19,10 +19,13 @@ For a plain-language walkthrough with figures, see
 | `optimizer_ngd` | AdamW + natural-gradient variational-mean updates |
 | `optimizer_fast_cosine` | LR 5e-4, shorter cosine schedule |
 | `combined_candidate` | Raised center + weak prior/KL + strong physics + 32×32 GP |
+| `no_prior` | Follow-up: η_init=15 with soft prior + KL off (`eta_prior_scale=0`, `kl_eta=0`) |
 
 The raised-center run is included because the explicit anchor is centered at
 `eta_init=12`, while the reference mean is about 14.9. Weakening that anchor
 does not necessarily increase η: the SSA residual previously drove η downward.
+The `no_prior` follow-up turns the soft mean prior and inducing KL fully off
+while keeping `eta_init=15` as the log-η coordinate center.
 
 ## Prepare and submit
 

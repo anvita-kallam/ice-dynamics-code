@@ -173,10 +173,15 @@ coverage — do not blindly export η_init=18 from this lab problem.
 ### What not to do next (based on this suite)
 
 - Do not weaken the η prior hoping to “let the data speak” — here that made
-  the low-η bias worse.
+  the low-η bias worse. A true **no-prior** follow-up (`no_prior.cfg`:
+  `eta_prior_scale=0`, `kl_eta=0`, `eta_init=15`) tests the extreme end of
+  that spectrum against the same sequential baseline.
 - Do not expect GP capacity or optimizer tweaks alone to fix mean bias.
 - Do not keep raising η_init forever; past ~18 the gains look mostly
   magnitude shifts with worse calibration.
+
+Real observation grids (e.g. Totten) live under [`data/real/`](../../data/real/);
+they are not yet wired into Archive VI.
 
 ---
 
