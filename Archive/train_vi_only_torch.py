@@ -330,6 +330,12 @@ def main(pars):
     if rank == 0:
         logging.info('VI-only training (frozen PINN):\n%s', __import__('pprint').pformat(to_dict(pars), indent=2))
         logging.info('physics=%s seed=%d', physics_approximation, seed)
+        logging.info(
+            'SSA prior friction_C=%s fluidity_A=%s eta_init=%s',
+            getattr(pars.prior, 'friction_C', getattr(pars.prior, 'friction_c', None)),
+            getattr(pars.prior, 'fluidity_A', getattr(pars.prior, 'fluidity_a', None)),
+            getattr(pars.prior, 'eta_init', None),
+        )
 
     obs_train, obs_test, phys_train, phys_test, norms, snapshot = make_joint_datasets(pars, torch_dtype)
     obs_train_loader = create_loader(

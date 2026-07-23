@@ -43,6 +43,16 @@ from utilities_torch import (
 DEFAULT_OUT = Path("outputs/figures/vi/totten_sliding_comparison")
 
 
+def prior_get(pars, name: str, default=None):
+    """ConfigParser historically lowercased keys; accept either case."""
+    if hasattr(pars.prior, name):
+        return getattr(pars.prior, name)
+    lower = name.lower()
+    if hasattr(pars.prior, lower):
+        return getattr(pars.prior, lower)
+    return default
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -156,7 +166,7 @@ def load_eta_maps(cfg_path: str, checkpoint_choice: str, device_override: str | 
         "cfg": cfg_path,
         "checkpoint": ckpt,
         "checkpoint_epoch": int(state.get("epoch", -1)),
-        "friction_C": float(pars.prior.friction_C),
+        "friction_C": float(prior_get(pars, "friction_C", 1.0)),
         "eta_init": eta_init,
         "eta_log_shift": shift,
         "x_km": snapshot.x / 1e3,

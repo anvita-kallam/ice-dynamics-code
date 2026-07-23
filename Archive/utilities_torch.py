@@ -290,6 +290,8 @@ def parse_config_value(value):
 class ParameterClass:
     def __init__(self, cfgfile=None):
         cfg = configparser.ConfigParser(inline_comment_prefixes=('#', ';'))
+        # Preserve key case so friction_C / fluidity_A match models_torch getattr.
+        cfg.optionxform = str
         cfg.read_string(default_cfg)
         sections = ('runtime', 'data', 'prior', 'likelihood', 'train', 'pretrain', 'predict', 'torch')
         for section in sections:
@@ -300,6 +302,7 @@ class ParameterClass:
 
         if cfgfile is not None:
             cfg = configparser.ConfigParser(inline_comment_prefixes=('#', ';'))
+            cfg.optionxform = str
             cfg.read(cfgfile)
             for section in sections:
                 sub_pars = getattr(self, section)

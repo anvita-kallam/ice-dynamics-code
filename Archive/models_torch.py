@@ -63,12 +63,24 @@ def icepack_ssa_constants(pars, torch_dtype, device):
         device=device,
     )
     fluidity_A = torch.tensor(
-        float(getattr(pars.prior, 'fluidity_A', 3.985e-13 * year * 1.0e18)),
+        float(
+            getattr(
+                pars.prior,
+                'fluidity_A',
+                getattr(pars.prior, 'fluidity_a', 3.985e-13 * year * 1.0e18),
+            )
+        ),
         dtype=torch_dtype,
         device=device,
     )
     friction_C = torch.tensor(
-        float(getattr(pars.prior, 'friction_C', 1.0)),
+        float(
+            getattr(
+                pars.prior,
+                'friction_C',
+                getattr(pars.prior, 'friction_c', 1.0),
+            )
+        ),
         dtype=torch_dtype,
         device=device,
     )
