@@ -221,8 +221,25 @@ def main():
 
     both = no["geom"] & mx["geom"]
     d_log10 = np.where(both, no["log10_eta_map"] - mx["log10_eta_map"], np.nan)
+    d_eta_max_minus_no = np.where(both, mx["eta_map"] - no["eta_map"], np.nan)
     d_std = np.where(both, no["log10_std_map"] - mx["log10_std_map"], np.nan)
     ratio = np.where(both, no["eta_map"] / np.maximum(mx["eta_map"], 1e-12), np.nan)
+
+    # Persist grids for local replotting without torch.
+    np.savez_compressed(
+        args.output_dir / "eta_maps.npz",
+        x_km=no["x_km"],
+        y_km=no["y_km"],
+        geom=both,
+        eta_no_sliding=no["eta_map"],
+        eta_max_sliding=mx["eta_map"],
+        log10_eta_no_sliding=no["log10_eta_map"],
+        log10_eta_max_sliding=mx["log10_eta_map"],
+        delta_eta_max_minus_no=d_eta_max_minus_no,
+        delta_log10_eta_no_minus_max=d_log10,
+        friction_C_no=no["friction_C"],
+        friction_C_max=mx["friction_C"],
+    )
 
     # --- Main 2x3 comparison -------------------------------------------------
     eta_norm = shared_log_norm(no["eta_map"], mx["eta_map"])
@@ -261,6 +278,27 @@ def main():
     )
     maps_path = args.output_dir / "eta_mean_std_comparison.png"
     fig.savefig(maps_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- Focused viscosity: no vs max vs (max − no) ----------------------------
+    d_eta_lim = max(
+        abs(float(np.nanpercentile(d_eta_max_minus_no, 2))),
+        abs(float(np.nanpercentile(d_eta_max_minus_no, 98))),
+        1e-4,
+    )
+    d_eta_norm = TwoSlopeNorm(vcenter=0.0, vmin=-d_eta_lim, vmax=d_eta_lim)
+    fig, axes = plt.subplots(1, 3, figsize=(14.5, 5.6), constrained_layout=True)
+    vis_panels = (
+        (axes[0], no["eta_map"], f"no sliding η\n(C={no['friction_C']:g})", "viridis", eta_norm, "η (MPa·yr)"),
+        (axes[1], mx["eta_map"], f"max sliding η\n(C={mx['friction_C']:g})", "viridis", eta_norm, "η (MPa·yr)"),
+        (axes[2], d_eta_max_minus_no, "Δη = max − no sliding", "RdBu_r", d_eta_norm, "η (MPa·yr)"),
+    )
+    for ax, field, title, cmap, norm, unit in vis_panels:
+        image = add_map(ax, no["x_km"], no["y_km"], field, title, cmap=cmap, norm=norm)
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02, label=unit)
+    fig.suptitle("Totten VI viscosity: basal-sliding end-members", fontsize=13)
+    vis_path = args.output_dir / "eta_viscosity_no_vs_max.png"
+    fig.savefig(vis_path, dpi=170, bbox_inches="tight")
     plt.close(fig)
 
     # --- Scatter / histograms ------------------------------------------------
@@ -357,11 +395,13 @@ def main():
         "comparison": {
             "log10_eta_corr": r,
             "median_log10_eta_diff_no_minus_max": float(np.nanmedian(d_log10)),
+            "median_eta_diff_max_minus_no": float(np.nanmedian(d_eta_max_minus_no)),
             "median_eta_ratio_no_over_max": float(np.nanmedian(ratio)),
             "median_log10_std_diff_no_minus_max": float(np.nanmedian(d_std)),
             "mean_abs_log10_eta_diff": float(np.nanmean(np.abs(d_log10))),
+            "mean_abs_eta_diff_max_minus_no": float(np.nanmean(np.abs(d_eta_max_minus_no))),
         },
-        "figures": [str(p) for p in (maps_path, diag_path, ratio_path)],
+        "figures": [str(p) for p in (maps_path, vis_path, diag_path, ratio_path)],
     }
     summary_path = args.output_dir / "sliding_comparison_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
