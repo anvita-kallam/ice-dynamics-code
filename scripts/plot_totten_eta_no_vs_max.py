@@ -44,7 +44,29 @@ def main():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm, TwoSlopeNorm
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm, TwoSlopeNorm
+
+    try:
+        import seaborn as sns
+
+        eta_cmap = LinearSegmentedColormap.from_list(
+            "Blues_d", sns.color_palette("Blues_d", n_colors=9)
+        ).reversed()
+    except ImportError:
+        # Matplotlib fallback approximating seaborn Blues_d (dark → light blue).
+        eta_cmap = LinearSegmentedColormap.from_list(
+            "Blues_d",
+            [
+                "#08306B",
+                "#08519C",
+                "#2171B5",
+                "#4292C6",
+                "#6BAED6",
+                "#9ECAE1",
+                "#C6DBEF",
+                "#DEEBF7",
+            ],
+        )
 
     with np.load(args.npz) as data:
         x_km = data["x_km"]
@@ -76,8 +98,8 @@ def main():
 
     fig, axes = plt.subplots(1, 3, figsize=(14.5, 5.6), constrained_layout=True)
     panels = (
-        (axes[0], eta_no, f"no sliding η (C={c_no:g})", "viridis", eta_norm, "η (MPa·yr)"),
-        (axes[1], eta_max, f"max sliding η (C={c_max:g})", "viridis", eta_norm, "η (MPa·yr)"),
+        (axes[0], eta_no, f"no sliding η (C={c_no:g})", eta_cmap, eta_norm, "η (MPa·yr)"),
+        (axes[1], eta_max, f"max sliding η (C={c_max:g})", eta_cmap, eta_norm, "η (MPa·yr)"),
         (axes[2], delta, "Δη = max − no sliding", "RdBu_r", d_norm, "η (MPa·yr)"),
     )
     for ax, field, title, cmap, norm, unit in panels:
