@@ -52,6 +52,7 @@ JOINT_FIELDS = (
     'grad_mean_net',
     'grad_vgp_eta',
     'grad_vgp_lambda',
+    'grad_eta_log_shift',
     'grad_ratio',
     'vgp_updates',
     'mean_updates',
@@ -90,6 +91,18 @@ VI_ONLY_FIELDS = JOINT_FIELDS + (
     'eta_post_std_p90',
     'calibration_within_1sigma',
     'calibration_within_2sigma',
+    # Collapse / dynamic-range diagnostics (no truth required).
+    'eta_log_shift',
+    'eta_median',
+    'eta_std',
+    'eta_max_over_min',
+    'eta_log10_range',
+    'eta_frac_at_floor',
+    'eta_frac_at_floor_grounded',
+    'eta_mean_grounded',
+    'eta_median_grounded',
+    'eta_min_grounded',
+    'eta_max_grounded',
 )
 
 DEBUG_FIELD_RE = re.compile(r'(\w+)=\[([\d.eE+-]+),([\d.eE+-]+)\]')
@@ -245,6 +258,7 @@ def summarize_debug_running(running_debug: dict) -> dict[str, float]:
         'grad_mean_net': running_debug['grad_norm_sum']['mean_net'] / count,
         'grad_vgp_eta': running_debug['grad_norm_sum']['vgp_eta'] / count,
         'grad_vgp_lambda': running_debug['grad_norm_sum']['vgp_lambda'] / count,
+        'grad_eta_log_shift': running_debug['grad_norm_sum'].get('eta_log_shift', 0.0) / count,
         'train_pde': _component_avg('momentum_nll'),
         'train_bc': _component_avg('continuity_nll'),
         'train_eta_prior': _component_avg('eta_prior'),
@@ -794,6 +808,34 @@ def iter_vi_only_figures(metrics: dict[str, np.ndarray]):
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         yield 'posterior_uncertainty', fig
+
+    # Viscosity posterior collapse diagnostics
+    if np.any(np.isfinite(metrics.get('eta_frac_at_floor', np.array([np.nan])))):
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.0), constrained_layout=True)
+        for ax, key, title, ylabel in (
+            (axes[0], 'eta_frac_at_floor', 'Fraction at η_min', 'fraction'),
+            (axes[1], 'eta_pred_mean', 'Mean η', 'MPa·yr'),
+            (axes[2], 'eta_log_shift', 'η_log_shift', 'log units'),
+        ):
+            values = metrics.get(key)
+            if values is None:
+                continue
+            mask = np.isfinite(values)
+            if mask.any():
+                ax.plot(epoch[mask], values[mask], color='tab:red')
+            if key == 'eta_frac_at_floor':
+                gvals = metrics.get('eta_frac_at_floor_grounded')
+                if gvals is not None:
+                    gmask = np.isfinite(gvals)
+                    if gmask.any():
+                        ax.plot(epoch[gmask], gvals[gmask], color='tab:blue', label='grounded')
+                        ax.legend(fontsize=8)
+            ax.set_xlabel('epoch')
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+        fig.suptitle('VI-only — viscosity collapse diagnostics', fontsize=12)
+        yield 'eta_collapse', fig
 
 
 def plot_vi_only_metrics(metrics: dict[str, np.ndarray], plot_dir: str | Path) -> list[Path]:

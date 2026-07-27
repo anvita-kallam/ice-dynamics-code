@@ -48,6 +48,60 @@ def grad(q, z):
     )[0]
 
 
+def resolve_eta_prior_log_mean(pars):
+    """Log-viscosity soft-prior target.
+
+    train.eta_prior_mean:
+      - 'auto' / None → log(eta_init)  (legacy behaviour: pull shift+θ → 0)
+      - float viscosity in MPa·yr → log(that value)
+    """
+    eta_init = float(getattr(pars.prior, 'eta_init', 12.0))
+    raw = getattr(pars.train, 'eta_prior_mean', 'auto')
+    if raw is None:
+        return math.log(max(eta_init, 1.0e-12))
+    if isinstance(raw, str):
+        if raw.strip().lower() in ('auto', 'eta_init', 'default', ''):
+            return math.log(max(eta_init, 1.0e-12))
+        return math.log(max(float(raw), 1.0e-12))
+    return math.log(max(float(raw), 1.0e-12))
+
+
+def materialize_eta(eta_log_raw, eta_log_min, eta_log_max, pars):
+    """Map unconstrained log-latent to positive η with configurable bounds.
+
+    prior.eta_bound_mode:
+      - 'log_clamp' (default): η = exp(clamp(z, log η_min, log η_max))
+        Hard clamp is inside the graph → zero ∂η/∂z at the floor.
+      - 'softplus_floor': η = η_min + softplus(exp(z) − η_min), then soft-cap at η_max.
+        Keeps a nonzero gradient near the lower bound.
+    """
+    mode = str(getattr(pars.prior, 'eta_bound_mode', 'log_clamp') or 'log_clamp').lower()
+    if mode in ('softplus_floor', 'softplus'):
+        eta_min = torch.exp(eta_log_min)
+        eta_max = torch.exp(eta_log_max)
+        eta_free = torch.exp(eta_log_raw)
+        eta = eta_min + F.softplus(eta_free - eta_min)
+        # Soft upper cap (still differentiable).
+        eta = eta_max - F.softplus(eta_max - eta)
+        return eta
+    eta_log = eta_log_raw.clamp(min=eta_log_min, max=eta_log_max)
+    return torch.exp(eta_log)
+
+
+def materialize_eta_numpy(eta_log_raw, eta_min, eta_max, bound_mode='log_clamp'):
+    """NumPy twin of materialize_eta for eval / plotting (no autograd)."""
+    mode = str(bound_mode or 'log_clamp').lower()
+    z = np.asarray(eta_log_raw, dtype=float)
+    if mode in ('softplus_floor', 'softplus'):
+        eta_free = np.exp(z)
+        softplus = np.log1p(np.exp(-np.abs(eta_free - eta_min))) + np.maximum(eta_free - eta_min, 0.0)
+        eta = eta_min + softplus
+        soft_cap = np.log1p(np.exp(-np.abs(eta_max - eta))) + np.maximum(eta_max - eta, 0.0)
+        return eta_max - soft_cap
+    eta_log = np.clip(z, math.log(max(eta_min, 1.0e-30)), math.log(max(eta_max, 1.0e-30)))
+    return np.exp(eta_log)
+
+
 # CHANGED: icepack unit system (m, yr, MPa) for SSA physics aligned with spin-up.
 def icepack_ssa_constants(pars, torch_dtype, device):
     """Return icepack-scaled constants used in IceStream SSA."""
@@ -776,14 +830,12 @@ class JointModel(nn.Module):
 
         for i in range(grid.shape[0]):
             theta_eta = sqrt2 * common['eta_scale'] * grid[i] + common['eta_loc']
-            eta_log = common['eta_log_center'] + self.eta_log_shift + theta_eta # if assume no spatial variation
-            eta_log = eta_log.clamp(min=common['eta_log_min'], max=common['eta_log_max'])
-            eta = torch.exp(eta_log)
-            # eta = eta_ref * torch.exp(theta_eta)
-            # eta = eta.clamp(min=pars.prior.eta_min, max=pars.prior.eta_max)
+            eta_log_raw = common['eta_log_center'] + self.eta_log_shift + theta_eta
+            eta = materialize_eta(
+                eta_log_raw, common['eta_log_min'], common['eta_log_max'], pars)
             if return_debug:
                 self._update_debug_stats(debug_stats, 'theta_eta', theta_eta)
-                self._update_debug_stats(debug_stats, 'eta_log', eta_log)
+                self._update_debug_stats(debug_stats, 'eta_log', eta_log_raw)
                 self._update_debug_stats(debug_stats, 'eta', eta)
             
             for j in range(grid.shape[0]):
@@ -905,12 +957,12 @@ class JointModel(nn.Module):
 
         for i in range(grid.shape[0]):
             theta_eta = sqrt2 * common['eta_scale'] * grid[i] + common['eta_loc']
-            eta_log = common['eta_log_center'] + self.eta_log_shift + theta_eta
-            eta_log = eta_log.clamp(min=common['eta_log_min'], max=common['eta_log_max'])
-            eta = torch.exp(eta_log)
+            eta_log_raw = common['eta_log_center'] + self.eta_log_shift + theta_eta
+            eta = materialize_eta(
+                eta_log_raw, common['eta_log_min'], common['eta_log_max'], pars)
             if return_debug:
                 self._update_debug_stats(debug_stats, 'theta_eta', theta_eta)
-                self._update_debug_stats(debug_stats, 'eta_log', eta_log)
+                self._update_debug_stats(debug_stats, 'eta_log', eta_log_raw)
                 self._update_debug_stats(debug_stats, 'eta', eta)
 
             # CHANGED: Glen membrane stress M = 2 μ (ε + tr(ε) I), μ in MPa·yr.
@@ -1051,16 +1103,20 @@ class JointModel(nn.Module):
         kl_lambda_scale = torch.tensor(pars.prior.kl_lambda, dtype=torch_dtype, device=batch_phys['x'].device) / batch_n.clamp(min=1.0)    
         kl_value = kl_eta_scale * kl_eta + kl_lambda_scale * kl_lambda
 
-        # Soft Gaussian anchor of log η toward log(eta_init).  Prevents the
-        # physics term from collapsing η while mean_net is frozen (observed
-        # when tight ssa_*_std alone preferred η → 0).
+        # Soft Gaussian anchor of log η toward log(eta_prior_mean).
+        # Default eta_prior_mean='auto' → log(eta_init), i.e. pull (shift+θ) → 0.
         eta_prior_scale = float(getattr(pars.train, 'eta_prior_scale', 0.0) or 0.0)
         eta_prior_std = float(getattr(pars.train, 'eta_prior_std', 1.0) or 1.0)
         eta_prior_reg = torch.zeros((), dtype=torch_dtype, device=batch_phys['x'].device)
         if eta_prior_scale > 0.0:
             eta_loc = self.vgp_eta.mean(Xn)
-            # eta = exp(log(eta_init) + eta_log_shift + theta); pull offset to 0.
-            log_eta_offset = self.eta_log_shift + eta_loc
+            eta_init = float(getattr(pars.prior, 'eta_init', 12.0))
+            prior_log_mean = resolve_eta_prior_log_mean(pars)
+            # η ≈ exp(log(eta_init) + shift + θ); offset from prior mean in log space.
+            log_eta_offset = (
+                math.log(max(eta_init, 1.0e-12)) + self.eta_log_shift + eta_loc
+                - prior_log_mean
+            )
             eta_prior_reg = 0.5 * torch.mean(
                 (log_eta_offset / max(eta_prior_std, 1.0e-6)) ** 2)
 

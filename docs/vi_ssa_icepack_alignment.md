@@ -81,9 +81,11 @@ Also in defaults / config:
 
 ```ini
 # CHANGED: effective viscosity prior in MPa·yr
-eta_init = 1.0          # was ~1e6
-eta_min = 1.0e-3
-eta_max = 1.0e6
+# Original defaults were in Pa·yr (eta_min=1e3, eta_max=1e10).
+# Convert with 1 MPa·yr = 1e6 Pa·yr (not the Pa·s factor 3.15576e13):
+eta_init = 1.0                 # was 1e6 Pa·yr → 1 MPa·yr
+eta_min = 1.0e3 / 1.0e6        # 1e-3 MPa·yr
+eta_max = 1.0e10 / 1.0e6       # 1e4  MPa·yr
 ```
 
 And when loading data:

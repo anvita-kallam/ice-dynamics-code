@@ -129,6 +129,8 @@ l_scale_eta = 10.0e3
 std_eta = 2.0
 # CHANGED: effective viscosity prior in icepack units (MPa·yr), matching spin-up NPZ viscosity.
 eta_init = 1.0
+# Bound enforcement: 'log_clamp' (legacy hard clamp on log η) or 'softplus_floor'.
+eta_bound_mode = 'log_clamp'
 l_scale_lambda = 10.0e3
 std_lambda = 1.0
 lambda_init = 0.5
@@ -137,8 +139,12 @@ num_inducing_x = 28
 num_inducing_y = 28
 # 'ice_fps': farthest-point sample on ice mask; 'bbox_grid': uniform bbox mesh.
 inducing_placement = 'ice_fps'
-eta_min = 1.0
-eta_max = 1.0e6
+# CHANGED: η bounds converted from the original Pa·yr defaults (eta_min=1e3, eta_max=1e10)
+# via 1 MPa·yr = 1e6 Pa·yr. Do NOT reuse the old Pa·yr numbers as MPa·yr.
+#   eta_min = 1.0e3  / 1.0e6 = 1.0e-3 MPa·yr
+#   eta_max = 1.0e10 / 1.0e6 = 1.0e4  MPa·yr
+eta_min = 1.0e3 / 1.0e6
+eta_max = 1.0e10 / 1.0e6
 thickness_min = 1.0
 # CHANGED: speed regularization in m/yr (icepack velocity units).
 speed_epsilon = 1.0
@@ -180,10 +186,12 @@ physics_batch_size = 512
 data_scale = 1.0
 phys_scale = 2.0
 state_reg_scale = 1.0
-# Soft log-η prior toward log(eta_init); blocks physics-driven η→0 collapse.
+# Soft log-η prior toward log(eta_prior_mean); blocks physics-driven η→0 collapse.
 # Keep mild (0.1–0.3) so the prior anchors the mean without flattening spatial η.
 eta_prior_scale = 0.2
 eta_prior_std = 1.0
+# Soft-prior center in MPa·yr, or 'auto' (= eta_init).
+eta_prior_mean = 'auto'
 # Log a warning when unfrozen mean_net grads dominate vgp_eta by more than this factor.
 grad_eta_warn_ratio = 100.0
 # Split optimizers: independent PINN vs VGP Adam (optional L-BFGS after unfreeze).

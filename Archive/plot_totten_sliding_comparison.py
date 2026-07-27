@@ -143,14 +143,17 @@ def load_eta_maps(cfg_path: str, checkpoint_choice: str, device_override: str | 
         theta = theta.cpu().numpy().reshape(-1)
         std = torch.sqrt(var).cpu().numpy().reshape(-1)
 
+    from models_torch import materialize_eta_numpy
+
     eta_init = float(pars.prior.eta_init)
     shift = float(model.eta_log_shift.detach().cpu().item())
-    eta_log = np.clip(
+    bound_mode = str(getattr(pars.prior, 'eta_bound_mode', 'log_clamp') or 'log_clamp')
+    eta_mean = materialize_eta_numpy(
         math.log(eta_init) + shift + theta,
-        math.log(float(pars.prior.eta_min)),
-        math.log(float(pars.prior.eta_max)),
+        float(pars.prior.eta_min),
+        float(pars.prior.eta_max),
+        bound_mode,
     )
-    eta_mean = np.exp(eta_log)
     log10_std = std / math.log(10.0)
 
     eta_map = np.full(snapshot.x.shape, np.nan)
@@ -235,13 +238,16 @@ def main():
         eta_max_sliding=mx["eta_map"],
         log10_eta_no_sliding=no["log10_eta_map"],
         log10_eta_max_sliding=mx["log10_eta_map"],
+        log10_std_no_sliding=no["log10_std_map"],
+        log10_std_max_sliding=mx["log10_std_map"],
         delta_eta_max_minus_no=d_eta_max_minus_no,
         delta_log10_eta_no_minus_max=d_log10,
+        delta_log10_std_no_minus_max=d_std,
         friction_C_no=no["friction_C"],
         friction_C_max=mx["friction_C"],
     )
 
-    # --- Main 2x3 comparison -------------------------------------------------
+    # --- Main 3x2 comparison (3 rows × 2 cols) --------------------------------
     eta_norm = shared_log_norm(no["eta_map"], mx["eta_map"])
     std_lo, std_hi = shared_linear_limits(no["log10_std_map"], mx["log10_std_map"])
     d_lim = max(
@@ -257,14 +263,14 @@ def main():
     )
     ds_norm = TwoSlopeNorm(vcenter=0.0, vmin=-ds_lim, vmax=ds_lim)
 
-    fig, axes = plt.subplots(2, 3, figsize=(14.5, 9.5), constrained_layout=True)
+    fig, axes = plt.subplots(3, 2, figsize=(10.5, 14.0), constrained_layout=True)
     panels = (
         (axes[0, 0], no["eta_map"], f"no_sliding η mean\n(C={no['friction_C']:g})", "viridis", eta_norm, None, None, "η (MPa·yr)"),
         (axes[0, 1], mx["eta_map"], f"max_sliding η mean\n(C={mx['friction_C']:g})", "viridis", eta_norm, None, None, "η (MPa·yr)"),
-        (axes[0, 2], d_log10, "Δ log10 η\n(no − max)", "RdBu_r", d_norm, None, None, "log10"),
         (axes[1, 0], no["log10_std_map"], "no_sliding log10 η std", "magma", None, std_lo, std_hi, "log10"),
         (axes[1, 1], mx["log10_std_map"], "max_sliding log10 η std", "magma", None, std_lo, std_hi, "log10"),
-        (axes[1, 2], d_std, "Δ log10 η std\n(no − max)", "RdBu_r", ds_norm, None, None, "log10"),
+        (axes[2, 0], d_log10, "Δ log10 η\n(no − max)", "RdBu_r", d_norm, None, None, "log10"),
+        (axes[2, 1], d_std, "Δ log10 η std\n(no − max)", "RdBu_r", ds_norm, None, None, "log10"),
     )
     for ax, field, title, cmap, norm, vmin, vmax, unit in panels:
         image = add_map(

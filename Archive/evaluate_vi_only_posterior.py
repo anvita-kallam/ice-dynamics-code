@@ -119,13 +119,17 @@ def main(argv):
         theta = theta.cpu().numpy()
         std = torch.sqrt(var).cpu().numpy()
 
+    from models_torch import materialize_eta_numpy
+
     eta_init = float(pars.prior.eta_init)
     shift = float(model.eta_log_shift.detach().cpu().item())
-    eta_log = np.clip(
+    bound_mode = str(getattr(pars.prior, 'eta_bound_mode', 'log_clamp') or 'log_clamp')
+    eta_mean = materialize_eta_numpy(
         math.log(eta_init) + shift + theta,
-        math.log(float(pars.prior.eta_min)),
-        math.log(float(pars.prior.eta_max)))
-    eta_mean = np.exp(eta_log)
+        float(pars.prior.eta_min),
+        float(pars.prior.eta_max),
+        bound_mode,
+    )
     eta_ref = snapshot.viscosity[ys, xs].astype(float)
     log_err = np.log10(eta_mean) - np.log10(eta_ref)
     log10_std = std / math.log(10.0)

@@ -76,11 +76,14 @@ def main(pars, num_samples=None):
         torch.as_tensor(X, dtype=torch_dtype, device=device),
         mean_net.iW_coord, mean_net.b_coord)
 
+    from models_torch import materialize_eta_numpy
+
     eta_init = float(getattr(pars.prior, 'eta_init', 12.0))
     eta_log_center = math.log(max(eta_init, 1.0e-12))
     eta_log_shift = float(model.eta_log_shift.detach().cpu().item())
-    eta_log_min = math.log(float(pars.prior.eta_min))
-    eta_log_max = math.log(float(pars.prior.eta_max))
+    eta_min = float(pars.prior.eta_min)
+    eta_max = float(pars.prior.eta_max)
+    bound_mode = str(getattr(pars.prior, 'eta_bound_mode', 'log_clamp') or 'log_clamp')
     lambda_init = float(getattr(pars.prior, 'lambda_init', 0.5))
     lambda_logit_center = math.log(lambda_init / max(1.0 - lambda_init, 1.0e-12))
     lambda_logit_shift = float(model.lambda_logit_shift.detach().cpu().item())
@@ -92,10 +95,10 @@ def main(pars, num_samples=None):
         theta_mean_np = theta_mean.cpu().numpy()
         theta_std = torch.sqrt(theta_var).cpu().numpy()
 
-    eta_samples = np.exp(np.clip(
-        eta_log_center + eta_log_shift + theta_samples, eta_log_min, eta_log_max))
-    eta_mean = np.exp(np.clip(
-        eta_log_center + eta_log_shift + theta_mean_np, eta_log_min, eta_log_max))
+    eta_samples = materialize_eta_numpy(
+        eta_log_center + eta_log_shift + theta_samples, eta_min, eta_max, bound_mode)
+    eta_mean = materialize_eta_numpy(
+        eta_log_center + eta_log_shift + theta_mean_np, eta_min, eta_max, bound_mode)
     # MAP ≈ posterior mean of θ for this Gaussian variational family.
     eta_map = eta_mean
     lambda_samples = 1.0 / (1.0 + np.exp(

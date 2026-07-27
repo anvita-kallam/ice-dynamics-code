@@ -207,7 +207,7 @@ The previous more_sliding joint run minimized the ELBO mainly by retuning PINN s
 | `mean_net_lr` / `vgp_eta_lr` | `1e-5` / `5e-4` | Prefer η updates; higher VGP LR while frozen |
 | `data_scale` / `phys_scale` / `state_reg_scale` | `1` / `3` / `1` | Slightly stronger physics after milder η prior |
 | `eta_prior_scale` / `eta_prior_std` | `0.2` / `1` | Anchor mean near `eta_init` without flattening spatial η |
-| `eta_min` | `1.0` | Hard floor against η→0 |
+| `eta_min` / `eta_max` | `1e3/1e6`, `1e10/1e6` | Converted from original **Pa·yr** defaults → MPa·yr |
 | `ssa_rx_std` / `ssa_ry_std` | `0.08` | Residual-aware physics |
 | `num_inducing_x/y` + `inducing_placement` | `28` / `ice_fps` | More inducing capacity for spatial structure |
 | `mean_net_optimizer` / `vgp_optimizer` | `adam` / `adam` | Split optimizers (independent LR / clip / schedule) |

@@ -225,10 +225,91 @@ def pack_vi_only_checkpoint(raw_model, optimizer_vgp, epoch, physics_approximati
     return payload
 
 
-def evaluate_eta_posterior(model, snapshot, device, torch_dtype, pars, max_points=8192):
-    """η posterior mean / variance vs spin-up viscosity (+ spatial correlation)."""
-    if snapshot.viscosity is None:
+def grounded_mask_from_snapshot(snapshot, pars):
+    """Icepack-style grounded mask: τ_c = 0.5 * max(p_ice − p_water, 0) > 0."""
+    year = float(getattr(pars.prior, 'year', 3600 * 24 * 365.25))
+    g = 9.81 * year ** 2
+    rho_ice = 917.0 / year ** 2 * 1.0e-6
+    rho_water = 1024.0 / year ** 2 * 1.0e-6
+    s = np.asarray(snapshot.s, dtype=float)
+    h = np.asarray(snapshot.h, dtype=float)
+    water_depth = np.maximum(-(s - h), 0.0)
+    p_water = rho_water * g * water_depth
+    p_ice = rho_ice * g * h
+    tau_c = 0.5 * np.maximum(p_ice - p_water, 0.0)
+    return snapshot.geom_mask & np.isfinite(tau_c) & (tau_c > 0.0)
+
+
+def evaluate_eta_collapse_stats(model, snapshot, device, torch_dtype, pars, max_points=50000):
+    """η distribution + grounded subset (works without viscosity truth)."""
+    from models_torch import materialize_eta_numpy
+
+    raw = model.module if isinstance(model, DDP) else model
+    ys, xs = np.where(snapshot.geom_mask)
+    if ys.size == 0:
         return None
+    if ys.size > max_points:
+        rng = np.random.default_rng(0)
+        pick = rng.choice(ys.size, size=int(max_points), replace=False)
+        ys, xs = ys[pick], xs[pick]
+    x = torch.as_tensor(snapshot.x[ys, xs], dtype=torch_dtype, device=device).reshape(-1, 1)
+    y = torch.as_tensor(snapshot.y[ys, xs], dtype=torch_dtype, device=device).reshape(-1, 1)
+    Xn = normalize_tensor(torch.cat([x, y], dim=1), raw.mean_net.iW_coord, raw.mean_net.b_coord)
+    with torch.no_grad():
+        theta, var_theta, _, _, _ = raw.vgp_eta.posterior_stats(Xn)
+        theta = theta.detach().cpu().numpy().reshape(-1)
+        std_theta = torch.sqrt(var_theta).detach().cpu().numpy().reshape(-1)
+    eta_init = float(getattr(pars.prior, 'eta_init', 12.0))
+    eta_log_center = math.log(max(eta_init, 1.0e-12))
+    eta_log_shift = float(raw.eta_log_shift.detach().cpu().item())
+    eta_min = float(pars.prior.eta_min)
+    eta_max = float(pars.prior.eta_max)
+    bound_mode = str(getattr(pars.prior, 'eta_bound_mode', 'log_clamp') or 'log_clamp')
+    eta = materialize_eta_numpy(
+        eta_log_center + eta_log_shift + theta, eta_min, eta_max, bound_mode)
+    floor = eta_min * (1.0 + 1e-3)
+    grounded = grounded_mask_from_snapshot(snapshot, pars)[ys, xs]
+    stats = {
+        'eta_log_shift': eta_log_shift,
+        'eta_pred_mean': float(np.mean(eta)),
+        'eta_median': float(np.median(eta)),
+        'eta_min': float(np.min(eta)),
+        'eta_max': float(np.max(eta)),
+        'eta_std': float(np.std(eta)),
+        'eta_max_over_min': float(np.max(eta) / max(np.min(eta), 1e-30)),
+        'eta_log10_range': float(np.log10(np.max(eta)) - np.log10(np.min(eta))),
+        'eta_frac_at_floor': float(np.mean(eta <= floor)),
+        'eta_post_var_mean': float(np.mean(std_theta ** 2)),
+        'eta_post_std_mean': float(np.mean(std_theta)),
+        'eta_post_std_p90': float(np.percentile(std_theta, 90)),
+        'n_points': int(eta.size),
+    }
+    if np.any(grounded):
+        eg = eta[grounded]
+        stats.update({
+            'eta_mean_grounded': float(np.mean(eg)),
+            'eta_median_grounded': float(np.median(eg)),
+            'eta_min_grounded': float(np.min(eg)),
+            'eta_max_grounded': float(np.max(eg)),
+            'eta_frac_at_floor_grounded': float(np.mean(eg <= floor)),
+        })
+    else:
+        stats.update({
+            'eta_mean_grounded': float('nan'),
+            'eta_median_grounded': float('nan'),
+            'eta_min_grounded': float('nan'),
+            'eta_max_grounded': float('nan'),
+            'eta_frac_at_floor_grounded': float('nan'),
+        })
+    return stats
+
+
+def evaluate_eta_posterior(model, snapshot, device, torch_dtype, pars, max_points=8192):
+    """η posterior mean / variance vs spin-up viscosity (+ collapse diagnostics)."""
+    if snapshot.viscosity is None:
+        return evaluate_eta_collapse_stats(
+            model, snapshot, device, torch_dtype, pars, max_points=max(max_points, 20000))
+    from models_torch import materialize_eta_numpy
     raw = model.module if isinstance(model, DDP) else model
     geom = snapshot.geom_mask & np.isfinite(snapshot.viscosity) & (snapshot.viscosity > 0)
     ys, xs = np.where(geom)
@@ -248,19 +329,20 @@ def evaluate_eta_posterior(model, snapshot, device, torch_dtype, pars, max_point
     eta_init = float(getattr(pars.prior, 'eta_init', 12.0))
     eta_log_center = math.log(max(eta_init, 1.0e-12))
     eta_log_shift = float(raw.eta_log_shift.detach().cpu().item())
-    eta_log_min = math.log(float(pars.prior.eta_min))
-    eta_log_max = math.log(float(pars.prior.eta_max))
-    eta_log = np.clip(eta_log_center + eta_log_shift + theta, eta_log_min, eta_log_max)
-    eta_pred = np.exp(eta_log)
-    # delta-method approx for log10(η) std from latent θ std
+    eta_min = float(pars.prior.eta_min)
+    eta_max = float(pars.prior.eta_max)
+    bound_mode = str(getattr(pars.prior, 'eta_bound_mode', 'log_clamp') or 'log_clamp')
+    eta_pred = materialize_eta_numpy(
+        eta_log_center + eta_log_shift + theta, eta_min, eta_max, bound_mode)
     log10_std = (std_theta / math.log(10.0))
     eta_ref = snapshot.viscosity[ys, xs].astype(float)
     log_err = np.log10(eta_pred) - np.log10(eta_ref)
     abs_err = np.abs(log_err)
-    # Rough calibration: fraction of truth within ±1 / ±2 predictive σ
     within_1 = float(np.mean(abs_err <= log10_std))
     within_2 = float(np.mean(abs_err <= 2.0 * log10_std))
-    return {
+    floor = eta_min * (1.0 + 1e-3)
+    grounded = grounded_mask_from_snapshot(snapshot, pars)[ys, xs]
+    out = {
         'log10_eta_rmse': float(np.sqrt(np.mean(log_err ** 2))),
         'log10_eta_bias': float(np.mean(log_err)),
         'log10_eta_r': float(np.corrcoef(np.log10(eta_pred), np.log10(eta_ref))[0, 1]),
@@ -273,7 +355,25 @@ def evaluate_eta_posterior(model, snapshot, device, torch_dtype, pars, max_point
         'calibration_within_1sigma': within_1,
         'calibration_within_2sigma': within_2,
         'n_points': int(eta_pred.size),
+        'eta_log_shift': eta_log_shift,
+        'eta_median': float(np.median(eta_pred)),
+        'eta_min': float(np.min(eta_pred)),
+        'eta_max': float(np.max(eta_pred)),
+        'eta_std': float(np.std(eta_pred)),
+        'eta_max_over_min': float(np.max(eta_pred) / max(np.min(eta_pred), 1e-30)),
+        'eta_log10_range': float(np.log10(np.max(eta_pred)) - np.log10(np.min(eta_pred))),
+        'eta_frac_at_floor': float(np.mean(eta_pred <= floor)),
     }
+    if np.any(grounded):
+        eg = eta_pred[grounded]
+        out.update({
+            'eta_mean_grounded': float(np.mean(eg)),
+            'eta_median_grounded': float(np.median(eg)),
+            'eta_min_grounded': float(np.min(eg)),
+            'eta_max_grounded': float(np.max(eg)),
+            'eta_frac_at_floor_grounded': float(np.mean(eg <= floor)),
+        })
+    return out
 
 
 class EarlyStopper:
@@ -610,21 +710,39 @@ def main(pars):
                 'lrs epoch=%d vgp=%.6e (%s) updates_vgp=%d mean_net=frozen',
                 epoch, lr_eta, opt_kind, int(running_debug.get('vgp_updates', 0)))
             if last_eta_metrics is not None:
-                logging.info(
-                    'eta_vs_ref epoch=%d log10_rmse=%.6f log10_bias=%.6f log10_r=%.6f '
-                    'rel_rmse=%.6f eta_pred_mean=%.6g post_std_mean=%.6g '
-                    'cal_1s=%.3f cal_2s=%.3f n=%d',
-                    epoch,
-                    last_eta_metrics['log10_eta_rmse'],
-                    last_eta_metrics['log10_eta_bias'],
-                    last_eta_metrics['log10_eta_r'],
-                    last_eta_metrics['rel_eta_rmse'],
-                    last_eta_metrics['eta_pred_mean'],
-                    last_eta_metrics['eta_post_std_mean'],
-                    last_eta_metrics['calibration_within_1sigma'],
-                    last_eta_metrics['calibration_within_2sigma'],
-                    last_eta_metrics['n_points'],
-                )
+                if 'log10_eta_rmse' in last_eta_metrics and math.isfinite(
+                        float(last_eta_metrics.get('log10_eta_rmse', float('nan')))):
+                    logging.info(
+                        'eta_vs_ref epoch=%d log10_rmse=%.6f log10_bias=%.6f log10_r=%.6f '
+                        'rel_rmse=%.6f eta_pred_mean=%.6g post_std_mean=%.6g '
+                        'cal_1s=%.3f cal_2s=%.3f n=%d',
+                        epoch,
+                        last_eta_metrics['log10_eta_rmse'],
+                        last_eta_metrics['log10_eta_bias'],
+                        last_eta_metrics['log10_eta_r'],
+                        last_eta_metrics['rel_eta_rmse'],
+                        last_eta_metrics['eta_pred_mean'],
+                        last_eta_metrics['eta_post_std_mean'],
+                        last_eta_metrics['calibration_within_1sigma'],
+                        last_eta_metrics['calibration_within_2sigma'],
+                        last_eta_metrics['n_points'],
+                    )
+                if 'eta_frac_at_floor' in last_eta_metrics:
+                    logging.info(
+                        'eta_collapse epoch=%d shift=%.6f mean=%.6g median=%.6g '
+                        'min=%.6g max=%.6g std=%.6g frac_floor=%.4f '
+                        'frac_floor_grounded=%.4f log10_range=%.4f',
+                        epoch,
+                        last_eta_metrics.get('eta_log_shift', float('nan')),
+                        last_eta_metrics.get('eta_pred_mean', float('nan')),
+                        last_eta_metrics.get('eta_median', float('nan')),
+                        last_eta_metrics.get('eta_min', float('nan')),
+                        last_eta_metrics.get('eta_max', float('nan')),
+                        last_eta_metrics.get('eta_std', float('nan')),
+                        last_eta_metrics.get('eta_frac_at_floor', float('nan')),
+                        last_eta_metrics.get('eta_frac_at_floor_grounded', float('nan')),
+                        last_eta_metrics.get('eta_log10_range', float('nan')),
+                    )
 
             debug_summary = summarize_debug_running(running_debug)
             if metrics_writer is not None:
