@@ -2,7 +2,7 @@
   "Lx": 640000.0,
   "Ly": 80000.0,
   "Ny": 15,
-  "A": 80,
+  "A": 40,
   "C": 0.001,
   "C_start": 0.01,
   "C_ramp_time": 4000.0,
@@ -26,14 +26,13 @@
   "step_print_every": 10,
   "shrink": 8,
   "exponent": 2,
-  "case_id": "more_sliding_A80",
-  "output_stem": "SteadyState_more_sliding_A80_10500yr_ramp4000_1refine",
+  "case_id": "more_sliding_A40",
+  "output_stem": "SteadyState_more_sliding_A40_10500yr_ramp4000_1refine",
   "grid_resolution": 500.0,
   "Ax": 0.0,
   "Ay": 0.0,
-  "A_field_saved_value": 80.0,
+  "A_field_saved_value": 40.0,
   "test_mode": false,
-  "notebook": "notebooks/spinup/spinupNewFull-moreSlide-A80.ipynb",
   "script": "notebooks/spinup/run_spinup_more_sliding_A80.py",
-  "notes": "Isolated from baseline more_sliding (A=20). Soft ice needs gentler handoffs after CG elevation and coarse→fine remesh (reset C ramp, dt=0.1, shorter stages). Rerun: activate firedrake-env and python -u notebooks/spinup/run_spinup_more_sliding_A80.py"
+  "notes": "Isolated from baseline more_sliding (A=20). A=40 soft ice with gentler handoffs after CG elevation and coarse→fine remesh (reset C ramp, dt=0.1, shorter stages)."
 }

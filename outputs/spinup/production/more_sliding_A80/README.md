@@ -1,33 +1,15 @@
-# more_sliding with A = 80
+# more_sliding with A = 80 (superseded)
 
-Isolated production spin-up (does **not** overwrite A=20 `more_sliding/`).
+**Superseded:** production spin-ups now use **A=40** via the same script with
+`case_id=more_sliding_A40`. See [`../more_sliding_A40/`](../more_sliding_A40/).
 
-| | Baseline | This case |
+This directory keeps the earlier A=80 attempt notes (CG1→CG2 / fine_low handoff
+blow-ups that motivated C re-ramp).
+
+| | Baseline | This case (historical) |
 |--|--|--|
 | A | 20 | **80** |
 | C | 1e-3 | 1e-3 |
-| Stage time | 10500 yr | 10500 yr |
-| Expected η | ~15 MPa·yr mean | lower (softer ice) |
 
-## Saved config
-
-- [`spinup_config.json`](spinup_config.json) — parameters
-- [`notebooks/spinup/spinupNewFull-moreSlide-A80.ipynb`](../../../notebooks/spinup/spinupNewFull-moreSlide-A80.ipynb)
-- [`notebooks/spinup/run_spinup_more_sliding_A80.py`](../../../notebooks/spinup/run_spinup_more_sliding_A80.py)
-
-## Rerun (local Firedrake)
-
-```bash
-cd "/Users/anvitakallam/Ice Dynamics"
-export PATH="$HOME/firedrake-env/bin:$PATH"
-export PETSC_DIR="$HOME/firedrake-env"
-export OMP_NUM_THREADS=1
-mkdir -p outputs/logs/spinup
-caffeinate -dims python -u notebooks/spinup/run_spinup_more_sliding_A80.py \
-  2>&1 | tee outputs/logs/spinup/more_sliding_A80_production.log
-```
-
-Outputs when finished:
-- `SteadyState_more_sliding_A80_10500yr_ramp4000_1refine.h5`
-- `...json`
-- `..._grid.npz`
+Soft ice (A=80) diverged on projection handoffs without a C re-ramp. The script
+now re-ramps C; prefer A=40 for the next production run.

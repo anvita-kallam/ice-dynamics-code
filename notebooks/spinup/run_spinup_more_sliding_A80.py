@@ -66,7 +66,7 @@ cfg = {
     "Ny": 15,
 
     # Physical parameters used by the spinup solve
-    "A": 80, # pre-factor (softer ice → lower η vs A=20 baseline)
+    "A": 40, # pre-factor (softer ice → lower η vs A=20 baseline)
     # End-member more sliding (small C).
     "C": 1e-3,
     "C_start": 1e-2,  # moderate sliding; ramped during spin-up for stability
@@ -77,7 +77,21 @@ cfg = {
     "coarse_total_time": 10500.0,
     "coarse_dt": 0.25,
 
-    # Fine-grid continuation
+    # Soft-ice handoffs (A=40 is softer than A=20 baseline).
+    # Re-ramp C and use shorter/finer continuations after CG elevation and
+    # after coarse→fine mesh projection; a full 10500 yr at C=0.001 can diverge.
+    "coarse_high_total_time": 4000.0,
+    "coarse_high_dt": 0.1,
+    "coarse_high_reset_c_ramp": True,
+    "fine_low_total_time": 4000.0,
+    "fine_low_dt": 0.1,
+    "fine_low_reset_c_ramp": True,
+    "fine_high_total_time": 4000.0,
+    "fine_high_dt": 0.1,
+    "fine_high_reset_c_ramp": True,
+    "max_avg_speed": 5000.0,  # abort early if diagnostic blows up
+
+    # Fine-grid defaults (overridden per-stage for soft ice above)
     "fine_total_time": 10500.0,
     "fine_dt": 0.25,
     "primary_solver": "petsc",  # petsc <-> icepack fallback each step
@@ -91,16 +105,16 @@ cfg = {
     "exponent": 2,
 
     # Output 
-    "case_id": "more_sliding_A80",
+    "case_id": "more_sliding_A40",
     "outdir": "",
     "save_dir": "",
-    "output_stem": "SteadyState_more_sliding_A80_10500yr_ramp4000_1refine",
+    "output_stem": "SteadyState_more_sliding_A40_10500yr_ramp4000_1refine",
     "grid_resolution": 500.0, # m
 
     # A-field. the solver uses constant A.
     "Ax": 0.0,
     "Ay": 0.0,
-    "A_field_saved_value": 80.0,
+    "A_field_saved_value": 40.0,
 }
 
 TEST_STAGE_YEARS = 200.0
@@ -171,6 +185,7 @@ C_START = float(cfg.get("C_start", cfg["C"]))
 C_RAMP_TIME = float(cfg.get("C_ramp_time", 0.0))
 SIMULATION_ELAPSED_YEARS = 0.0  # cumulative time for C ramp across stages
 PRIMARY_SOLVER = cfg.get("primary_solver", "petsc")
+MAX_AVG_SPEED = float(cfg.get("max_avg_speed", 0.0) or 0.0)
 
 
 # ------------------------------------------------------------
@@ -504,6 +519,7 @@ def run_simulation(
     stage_name="simulation",
     print_every=10,
     time_offset=0.0,
+    reset_c_ramp=False,
     **fields,
 ):
     h, s, u, z_b = map(
@@ -527,8 +543,14 @@ def run_simulation(
 
     for step in progress_bar:
         t0 = walltime.time()
-        elapsed_years = time_offset + (step + 1) * dt
-        assign_ramped_C(elapsed_years)
+        stage_years = (step + 1) * dt
+        if reset_c_ramp:
+            # Re-stabilize after CG elevation / mesh projection.
+            assign_ramped_C(stage_years)
+            elapsed_years = time_offset + stage_years
+        else:
+            elapsed_years = time_offset + stage_years
+            assign_ramped_C(elapsed_years)
 
         h = primary_solver.prognostic_solve(
             dt,
@@ -558,6 +580,13 @@ def run_simulation(
         avg_speed = float(
             firedrake.assemble(firedrake.sqrt(firedrake.inner(u, u)) * dx) / DOMAIN_AREA
         )
+
+        if MAX_AVG_SPEED > 0.0 and avg_speed > MAX_AVG_SPEED:
+            raise ConvergenceError(
+                f"{stage_name} step {step + 1}: avg speed {avg_speed:.3g} m/yr "
+                f"exceeds max_avg_speed={MAX_AVG_SPEED:g}. "
+                "Likely unstable CG elevation / soft-ice handoff."
+            )
 
         description = (
             f"{stage_name}: t={elapsed_years:g}, C={float(C):.3g}, "
@@ -592,7 +621,7 @@ def run_simulation(
     return {"thickness": h, "surface": s, "velocity": u}
 
 
-def make_initial_fields(mesh, degree, *, source_fields=None):
+def make_initial_fields(mesh, degree, *, source_fields=None, reset_c_ramp=False):
     """
     If source_fields is None:
         use h = 100 m and the linear x velocity guess.
@@ -615,7 +644,16 @@ def make_initial_fields(mesh, degree, *, source_fields=None):
 
     s_0 = icepack.compute_surface(thickness=h_0, bed=z_b)
 
-    assign_ramped_C(SIMULATION_ELAPSED_YEARS)
+    if reset_c_ramp:
+        # Start CG-elevation restabilization from C_START, not the cumulative target.
+        C.assign(C_START)
+        friction_continuation = True
+    else:
+        assign_ramped_C(SIMULATION_ELAPSED_YEARS)
+        friction_continuation = (
+            source_fields is not None and abs(float(C) - float(C_START)) > 0.0
+        )
+
     icepack_solver = make_solver("icepack", monitor=False)
     petsc_solver = make_solver("petsc", monitor=MONITOR_SNES)
 
@@ -626,9 +664,7 @@ def make_initial_fields(mesh, degree, *, source_fields=None):
         thickness=h_0,
         surface=s_0,
         stage_name=f"CG{degree} initial diagnostic",
-        friction_continuation=(
-            source_fields is not None and abs(float(C) - float(C_START)) > 0.0
-        ),
+        friction_continuation=friction_continuation,
     )
 
     fields = {
@@ -650,17 +686,24 @@ def run_stage(
     dt,
     *,
     source_fields=None,
+    reset_c_ramp=False,
 ):
     """
     Run one CG-degree simulation stage with bidirectional solver fallback
     and log-linear C ramping from C_START to C_TARGET.
-    C ramp time is measured cumulatively across stages (no reset).
+    C ramp time is measured cumulatively across stages (no reset), unless
+    reset_c_ramp=True (used after CG elevation or coarse→fine remesh for soft ice).
     """
     global SIMULATION_ELAPSED_YEARS
     time_offset = SIMULATION_ELAPSED_YEARS
+    ramp_note = (
+        f"C re-ramp within stage over {C_RAMP_TIME:g} yr"
+        if reset_c_ramp
+        else f"C: {C_START:g} -> {C_TARGET:g} over {C_RAMP_TIME:g} yr (cumulative)"
+    )
     print(
         f"\n=== {stage_name}: CG{degree}, total_time={total_time}, "
-        f"dt={dt}, C: {C_START:g} -> {C_TARGET:g} over {C_RAMP_TIME:g} yr ===",
+        f"dt={dt}, {ramp_note} ===",
         flush=True,
     )
 
@@ -668,6 +711,7 @@ def run_stage(
         mesh,
         degree,
         source_fields=source_fields,
+        reset_c_ramp=reset_c_ramp,
     )
 
     primary_solver = make_solver(PRIMARY_SOLVER, monitor=MONITOR_SNES)
@@ -683,6 +727,7 @@ def run_stage(
         stage_name=stage_name,
         print_every=STEP_PRINT_EVERY,
         time_offset=time_offset,
+        reset_c_ramp=reset_c_ramp,
         bed=z_b,
         **fields,
     )
@@ -754,10 +799,11 @@ fields_coarse_high, Q2_coarse, V2_coarse, z_b_coarse_high, h_inflow_coarse_high 
         "coarse_high",
         coarse_mesh,
         degree=2,
-        total_time=COARSE_TOTAL_TIME,
-        dt=COARSE_DT,
+        total_time=float(cfg.get("coarse_high_total_time", COARSE_TOTAL_TIME)),
+        dt=float(cfg.get("coarse_high_dt", COARSE_DT)),
         # Project CG1 spin-up onto CG2; avoids h=100 + target C mismatch after cumulative ramp.
         source_fields=fields_coarse_low,
+        reset_c_ramp=bool(cfg.get("coarse_high_reset_c_ramp", False)),
     )
 )
 
@@ -899,9 +945,11 @@ fields_fine_low, Q1_fine, V1_fine, z_b_fine_low, h_inflow_fine_low = run_stage(
     "fine_low",
     fine_mesh,
     degree=1,
-    total_time=FINE_TOTAL_TIME,
-    dt=FINE_DT,
+    total_time=float(cfg.get("fine_low_total_time", FINE_TOTAL_TIME)),
+    dt=float(cfg.get("fine_low_dt", FINE_DT)),
+    # Project coarse CG2 onto fine CG1; soft ice needs C re-ramp after remesh.
     source_fields=fields_coarse_high,
+    reset_c_ramp=bool(cfg.get("fine_low_reset_c_ramp", False)),
 )
 
 save_field_plot(
@@ -924,9 +972,10 @@ fields_fine_high, Q2_fine, V2_fine, z_b_fine_high, h_inflow_fine_high = run_stag
     "fine_high",
     fine_mesh,
     degree=2,
-    total_time=FINE_TOTAL_TIME,
-    dt=FINE_DT,
-    source_fields=fields_coarse_high,
+    total_time=float(cfg.get("fine_high_total_time", FINE_TOTAL_TIME)),
+    dt=float(cfg.get("fine_high_dt", FINE_DT)),
+    source_fields=fields_fine_low,
+    reset_c_ramp=bool(cfg.get("fine_high_reset_c_ramp", False)),
 )
 
 save_field_plot(
