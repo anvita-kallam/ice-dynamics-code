@@ -101,8 +101,12 @@ VI_ONLY_FIELDS = JOINT_FIELDS + (
     'eta_frac_at_floor_grounded',
     'eta_mean_grounded',
     'eta_median_grounded',
+    'eta_std_grounded',
     'eta_min_grounded',
     'eta_max_grounded',
+    'eta_max_over_min_grounded',
+    'eta_log10_range_grounded',
+    'n_points_grounded',
 )
 
 DEBUG_FIELD_RE = re.compile(r'(\w+)=\[([\d.eE+-]+),([\d.eE+-]+)\]')

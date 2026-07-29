@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Stage 2 (sequential): VI on η with a frozen pretrained PINN — no joint updates.
+"""Stage 2 (sequential): VI on η with a pretrained PINN.
 
-Optimizes only VGP (+ scalar shifts). The MeanNetwork is permanently frozen.
-Improvements for spatial-η recovery (kernels, AdamW/NGD, schedulers, early
-stopping, diagnostics) live here and do not change train_torch.py joint runs.
+Default: MeanNetwork permanently frozen (VGP + shifts only).
+Optional: train.freeze_mean_net = False also updates the PINN (u,v,s,H)
+so basal-friction changes can imprint through velocity as well as η.
 """
 
 from __future__ import annotations
@@ -89,7 +89,21 @@ Usage:
 """
 
 VI_ONLY_ARCHITECTURE = 'coordinate_only_vi_only_frozen_pinn_v1'
+VI_ONLY_ARCHITECTURE_UNFROZEN = 'coordinate_only_vi_only_trainable_pinn_v1'
+VI_ONLY_ARCHITECTURES = (VI_ONLY_ARCHITECTURE, VI_ONLY_ARCHITECTURE_UNFROZEN)
 TRAINING_STAGE = 'vi_only'
+
+
+def freeze_mean_net_enabled(pars) -> bool:
+    """Default True preserves sequential VI-only (frozen PINN) behavior."""
+    return bool(getattr(pars.train, 'freeze_mean_net', True))
+
+
+def resolve_architecture(pars) -> str:
+    return (
+        VI_ONLY_ARCHITECTURE if freeze_mean_net_enabled(pars)
+        else VI_ONLY_ARCHITECTURE_UNFROZEN
+    )
 
 
 def resolve_vgp_lrs(pars):
@@ -98,6 +112,8 @@ def resolve_vgp_lrs(pars):
         'vgp_eta': base if getattr(pars.train, 'vgp_eta_lr', None) is None else pars.train.vgp_eta_lr,
         'vgp_lambda': (
             base if getattr(pars.train, 'vgp_lambda_lr', None) is None else pars.train.vgp_lambda_lr),
+        'mean_net': (
+            base if getattr(pars.train, 'mean_net_lr', None) is None else pars.train.mean_net_lr),
     }
 
 
@@ -122,6 +138,29 @@ def _vgp_variational_params(vgp, include_loc=True):
     return params
 
 
+def learn_eta_shift_enabled(pars) -> bool:
+    """Whether the global η log-shift is an active trainable parameter.
+
+    Defaults preserve baseline (learnable). Either of these freezes it at 0:
+      learn_eta_shift = False
+      freeze_eta_log_shift = True
+    """
+    if bool(getattr(pars.train, 'freeze_eta_log_shift', False)):
+        return False
+    return bool(getattr(pars.train, 'learn_eta_shift', True))
+
+
+def apply_eta_shift_trainability(raw_model, pars):
+    """Freeze or unfreeze eta_log_shift according to cfg flags."""
+    if learn_eta_shift_enabled(pars):
+        raw_model.eta_log_shift.requires_grad_(True)
+        return True
+    with torch.no_grad():
+        raw_model.eta_log_shift.zero_()
+    raw_model.eta_log_shift.requires_grad_(False)
+    return False
+
+
 def build_vi_optimizers(raw_model, pars, vgp_lrs):
     """Adam / AdamW / AdamW+NGD over VGP params only (PINN excluded)."""
     opt_name = str(getattr(pars.train, 'vgp_optimizer', 'adamw') or 'adamw').strip().lower()
@@ -134,6 +173,7 @@ def build_vi_optimizers(raw_model, pars, vgp_lrs):
     eta_lr = vgp_lrs['vgp_eta']
     lam_lr = vgp_lrs['vgp_lambda']
     ngd_lr = float(getattr(pars.train, 'vgp_ngd_lr', eta_lr) or eta_lr)
+    learn_shift = learn_eta_shift_enabled(pars)
 
     if use_ngd:
         hyper_groups = [
@@ -145,14 +185,18 @@ def build_vi_optimizers(raw_model, pars, vgp_lrs):
                 'lr': eta_lr,
             },
             {
-                'params': [raw_model.eta_log_shift],
-                'lr': float(getattr(pars.train, 'eta_shift_lr', eta_lr)),
-            },
-            {
                 'params': [raw_model.lambda_logit_shift],
                 'lr': float(getattr(pars.train, 'lambda_shift_lr', lam_lr)),
             },
         ]
+        if learn_shift:
+            hyper_groups.insert(
+                -1,
+                {
+                    'params': [raw_model.eta_log_shift],
+                    'lr': float(getattr(pars.train, 'eta_shift_lr', eta_lr)),
+                },
+            )
         hyper_groups = [g for g in hyper_groups if g['params']]
         optimizer = create_optimizer(base_opt, hyper_groups, learning_rate=eta_lr)
         ngd = VariationalNaturalGradient(
@@ -163,14 +207,18 @@ def build_vi_optimizers(raw_model, pars, vgp_lrs):
         {'params': list(raw_model.vgp_eta.parameters()), 'lr': eta_lr},
         {'params': list(raw_model.vgp_lambda.parameters()), 'lr': lam_lr},
         {
-            'params': [raw_model.eta_log_shift],
-            'lr': float(getattr(pars.train, 'eta_shift_lr', eta_lr)),
-        },
-        {
             'params': [raw_model.lambda_logit_shift],
             'lr': float(getattr(pars.train, 'lambda_shift_lr', lam_lr)),
         },
     ]
+    if learn_shift:
+        groups.insert(
+            2,
+            {
+                'params': [raw_model.eta_log_shift],
+                'lr': float(getattr(pars.train, 'eta_shift_lr', eta_lr)),
+            },
+        )
     optimizer = create_optimizer(base_opt, groups, learning_rate=eta_lr)
     return optimizer, None, base_opt
 
@@ -202,27 +250,47 @@ def build_vgp_scheduler(optimizer, pars, n_epochs_this_run):
     raise ValueError(f"Unsupported train.lr_scheduler={kind!r}")
 
 
-def pack_vi_only_checkpoint(raw_model, optimizer_vgp, epoch, physics_approximation, extra=None):
+def pack_vi_only_checkpoint(
+    raw_model, optimizer_vgp, epoch, physics_approximation, extra=None, *,
+    mean_net_frozen=True, optimizer_mean=None, architecture=None,
+):
     payload = {
         'model': raw_model.state_dict(),
         'optimizer_vgp': optimizer_vgp.state_dict(),
         'optimizer': optimizer_vgp.state_dict(),
         'epoch': epoch,
-        'architecture': VI_ONLY_ARCHITECTURE,
+        'architecture': architecture or (
+            VI_ONLY_ARCHITECTURE if mean_net_frozen else VI_ONLY_ARCHITECTURE_UNFROZEN
+        ),
         'mean_net_outputs': MEAN_NET_OUTPUTS,
         'physics_approximation': physics_approximation,
         'coordinate_only': True,
-        'mean_net_frozen': True,
+        'mean_net_frozen': bool(mean_net_frozen),
         'mean_net_first_layer_in_features': first_state_layer(raw_model.mean_net).in_features,
-        'optimizer_layout': 'vi_only_vgp_v1',
-        'training_mode': 'vi_only_frozen_pinn',
+        'optimizer_layout': 'vi_only_vgp_v1' if mean_net_frozen else 'vi_only_mean_vgp_v1',
+        'training_mode': (
+            'vi_only_frozen_pinn' if mean_net_frozen else 'vi_only_trainable_pinn'
+        ),
         'kernel_type': raw_model.vgp_eta.kernel_type,
         'anisotropic': bool(raw_model.vgp_eta.anisotropic),
         'num_inducing': int(raw_model.vgp_eta.inducing_index_points.shape[0]),
     }
+    if optimizer_mean is not None:
+        payload['optimizer_mean'] = optimizer_mean.state_dict()
     if extra:
         payload.update(extra)
     return payload
+
+
+def build_mean_net_optimizer(raw_model, pars, mean_lr):
+    opt_name = str(
+        getattr(pars.train, 'mean_net_optimizer', 'adam') or 'adam'
+    ).strip().lower()
+    return create_optimizer(
+        opt_name,
+        list(raw_model.mean_net.parameters()),
+        learning_rate=float(mean_lr),
+    ), opt_name
 
 
 def grounded_mask_from_snapshot(snapshot, pars):
@@ -289,17 +357,25 @@ def evaluate_eta_collapse_stats(model, snapshot, device, torch_dtype, pars, max_
         stats.update({
             'eta_mean_grounded': float(np.mean(eg)),
             'eta_median_grounded': float(np.median(eg)),
+            'eta_std_grounded': float(np.std(eg)),
             'eta_min_grounded': float(np.min(eg)),
             'eta_max_grounded': float(np.max(eg)),
+            'eta_max_over_min_grounded': float(np.max(eg) / max(np.min(eg), 1e-30)),
+            'eta_log10_range_grounded': float(np.log10(np.max(eg)) - np.log10(np.min(eg))),
             'eta_frac_at_floor_grounded': float(np.mean(eg <= floor)),
+            'n_points_grounded': int(eg.size),
         })
     else:
         stats.update({
             'eta_mean_grounded': float('nan'),
             'eta_median_grounded': float('nan'),
+            'eta_std_grounded': float('nan'),
             'eta_min_grounded': float('nan'),
             'eta_max_grounded': float('nan'),
+            'eta_max_over_min_grounded': float('nan'),
+            'eta_log10_range_grounded': float('nan'),
             'eta_frac_at_floor_grounded': float('nan'),
+            'n_points_grounded': 0,
         })
     return stats
 
@@ -436,6 +512,12 @@ def main(pars):
             getattr(pars.prior, 'fluidity_A', getattr(pars.prior, 'fluidity_a', None)),
             getattr(pars.prior, 'eta_init', None),
         )
+        logging.info(
+            'phys weights grounded=%s floating=%s | learn_eta_shift=%s',
+            getattr(pars.train, 'grounded_phys_weight', 1.0),
+            getattr(pars.train, 'floating_phys_weight', 1.0),
+            learn_eta_shift_enabled(pars),
+        )
 
     obs_train, obs_test, phys_train, phys_test, norms, snapshot = make_joint_datasets(pars, torch_dtype)
     obs_train_loader = create_loader(
@@ -481,13 +563,19 @@ def main(pars):
                     getattr(pars.train, 'verify_pretrain_loss_rtol', 5.0e-2),
                     getattr(pars.train, 'verify_pretrain_loss_atol', 1.0e-8))
                 if rank == 0:
-                    logging.info('loaded frozen mean_net from pretrain: %s', pretrain_ckpt)
+                    logging.info('loaded mean_net from pretrain: %s', pretrain_ckpt)
                     log_mean_net_obs_stats('pretrain-load verification on obs_test', pretrain_verify_stats)
 
-    # Permanently freeze PINN before wrapping DDP.
-    set_module_requires_grad(model.mean_net, False)
-    model.mean_net.eval()
+    freeze_mean = freeze_mean_net_enabled(pars)
+    architecture = resolve_architecture(pars)
     set_vgp_trainable(model, True)
+    if freeze_mean:
+        # Permanently freeze PINN before wrapping DDP (baseline sequential VI).
+        set_module_requires_grad(model.mean_net, False)
+        model.mean_net.eval()
+    else:
+        set_module_requires_grad(model.mean_net, True)
+        model.mean_net.train()
 
     if distributed:
         ddp_kwargs = {'device_ids': [local_rank], 'output_device': local_rank} if device.type == 'cuda' else {}
@@ -495,12 +583,32 @@ def main(pars):
         model = DDP(model, **ddp_kwargs)
 
     raw_model = model.module if isinstance(model, DDP) else model
-    set_module_requires_grad(raw_model.mean_net, False)
-    raw_model.mean_net.eval()
+    if freeze_mean:
+        set_module_requires_grad(raw_model.mean_net, False)
+        raw_model.mean_net.eval()
+    else:
+        set_module_requires_grad(raw_model.mean_net, True)
+    learn_shift = apply_eta_shift_trainability(raw_model, pars)
 
     vgp_lrs = resolve_vgp_lrs(pars)
     optimizer_vgp, ngd_opt, opt_kind = build_vi_optimizers(raw_model, pars, vgp_lrs)
-    _, vgp_grad_clip = resolve_grad_clips(pars)
+    optimizer_mean = None
+    mean_opt_kind = 'frozen'
+    if not freeze_mean:
+        optimizer_mean, mean_opt_kind = build_mean_net_optimizer(
+            raw_model, pars, vgp_lrs['mean_net'])
+    mean_grad_clip, vgp_grad_clip = resolve_grad_clips(pars)
+    if rank == 0:
+        logging.info(
+            'freeze_mean_net=%s architecture=%s mean_opt=%s mean_lr=%s '
+            'floating_phys_weight=%s grounded_phys_weight=%s',
+            freeze_mean,
+            architecture,
+            mean_opt_kind,
+            None if freeze_mean else vgp_lrs['mean_net'],
+            getattr(pars.train, 'floating_phys_weight', 1.0),
+            getattr(pars.train, 'grounded_phys_weight', 1.0),
+        )
 
     ckpt_file_old = checkpoint_path(pars.train.checkdir, pars.train.checkname_old)
     ckpt_file_new = checkpoint_path(pars.train.checkdir, pars.train.checkname_new)
@@ -521,21 +629,36 @@ def main(pars):
         if not Path(ckpt_file_old).exists():
             raise FileNotFoundError(f'train.restore=True but checkpoint missing: {ckpt_file_old}')
         state = torch_load_checkpoint(ckpt_file_old, map_location=device)
-        require_checkpoint_architecture(state, ckpt_file_old, VI_ONLY_ARCHITECTURE, 'vi-only model')
+        require_checkpoint_architecture(
+            state, ckpt_file_old, architecture, 'vi-only model')
         target = model.module if isinstance(model, DDP) else model
         joint_state = {
             k: v for k, v in checkpoint_model_state(state, ckpt_file_old).items()
             if not k.startswith('mean_net_ref.')
         }
         strict_load_state_dict(target, joint_state, ckpt_file_old, 'vi-only model')
-        set_module_requires_grad(raw_model.mean_net, False)
-        raw_model.mean_net.eval()
+        if freeze_mean:
+            set_module_requires_grad(raw_model.mean_net, False)
+            raw_model.mean_net.eval()
+        else:
+            set_module_requires_grad(raw_model.mean_net, True)
+        apply_eta_shift_trainability(raw_model, pars)
         if getattr(pars.train, 'restore_optimizer', False) and 'optimizer_vgp' in state:
             try:
                 optimizer_vgp.load_state_dict(state['optimizer_vgp'])
             except (ValueError, RuntimeError) as exc:
                 if rank == 0:
                     logging.warning('Skipping optimizer_vgp restore: %s', exc)
+        if (
+            getattr(pars.train, 'restore_optimizer', False)
+            and optimizer_mean is not None
+            and 'optimizer_mean' in state
+        ):
+            try:
+                optimizer_mean.load_state_dict(state['optimizer_mean'])
+            except (ValueError, RuntimeError) as exc:
+                if rank == 0:
+                    logging.warning('Skipping optimizer_mean restore: %s', exc)
         completed = int(state.get('epoch', -1))
         start_epoch = completed + 1
         if rank == 0:
@@ -603,10 +726,13 @@ def main(pars):
     prev_lrs = [g['lr'] for g in optimizer_vgp.param_groups]
 
     for epoch in range(start_epoch, stop_epoch):
-        # Keep PINN in eval + frozen; only VGP in train mode for dropout-free BN consistency.
         model.train()
-        raw_model.mean_net.eval()
-        set_module_requires_grad(raw_model.mean_net, False)
+        if freeze_mean:
+            raw_model.mean_net.eval()
+            set_module_requires_grad(raw_model.mean_net, False)
+        else:
+            raw_model.mean_net.train()
+            set_module_requires_grad(raw_model.mean_net, True)
 
         for loader in (obs_train_loader, phys_train_loader):
             if distributed and isinstance(loader.sampler, DistributedSampler):
@@ -623,33 +749,40 @@ def main(pars):
             batch_phys = move_batch_to_device(batch_phys, device, torch_dtype)
 
             optimizer_vgp.zero_grad(set_to_none=True)
+            if optimizer_mean is not None:
+                optimizer_mean.zero_grad(set_to_none=True)
             if ngd_opt is not None:
                 ngd_opt.zero_grad()
 
-            # PINN weights have requires_grad=False; forward still differentiates
-            # w.r.t. coordinates for PDE residuals and w.r.t. η (VGP).
             losses = joint_loss(
                 model, batch_obs, batch_phys, grid, weights, pars, torch_dtype, world_size,
                 return_debug=True)
             total_loss = losses[0] + losses[1] + losses[2] + losses[3]
             total_loss.backward()
 
-            # Drop any accidental mean_net grads (should already be None).
-            for p in raw_model.mean_net.parameters():
-                if p.grad is not None:
-                    p.grad = None
+            if freeze_mean:
+                # Drop any accidental mean_net grads (should already be None).
+                for p in raw_model.mean_net.parameters():
+                    if p.grad is not None:
+                        p.grad = None
 
             grad_norms = collect_grad_norms(raw_model)
             clipped = clip_module_grads(raw_model.vgp_eta, vgp_grad_clip)
             clip_module_grads(raw_model.vgp_lambda, vgp_grad_clip)
             clip_param_grads(
                 [raw_model.eta_log_shift, raw_model.lambda_logit_shift], vgp_grad_clip)
+            if not freeze_mean:
+                clipped_mean = clip_module_grads(raw_model.mean_net, mean_grad_clip)
+                record_clip_norm(running_debug, 'mean_net', clipped_mean)
             record_clip_norm(running_debug, 'vgp', clipped)
             update_debug_running(running_debug, losses[4], grad_norms)
 
             if ngd_opt is not None:
                 ngd_opt.step()
             optimizer_vgp.step()
+            if optimizer_mean is not None:
+                optimizer_mean.step()
+                running_debug['mean_updates'] = running_debug.get('mean_updates', 0) + 1
             running_debug['vgp_updates'] += 1
             running[0] += losses[0].detach().to(torch.float64)
             running[1] += losses[1].detach().to(torch.float64)
@@ -661,7 +794,11 @@ def main(pars):
                 atomic_torch_save(
                     pack_vi_only_checkpoint(
                         raw_model, optimizer_vgp, epoch, physics_approximation,
-                        extra={'preempt_checkpoint': True}),
+                        extra={'preempt_checkpoint': True},
+                        mean_net_frozen=freeze_mean,
+                        optimizer_mean=optimizer_mean,
+                        architecture=architecture,
+                    ),
                     ckpt_file_old,
                 )
                 print('[slurm] Preemption checkpoint saved. Exiting for requeue.', flush=True)
@@ -706,9 +843,11 @@ def main(pars):
                 epoch, kd['kernel_type'], kd['amplitude'], kd['length_scale'],
                 kd['length_scale_x'], kd['length_scale_y'], int(kd['num_inducing']))
             lr_eta = optimizer_vgp.param_groups[0]['lr']
+            mean_status = 'frozen' if freeze_mean else f'trainable({mean_opt_kind})'
             logging.info(
-                'lrs epoch=%d vgp=%.6e (%s) updates_vgp=%d mean_net=frozen',
-                epoch, lr_eta, opt_kind, int(running_debug.get('vgp_updates', 0)))
+                'lrs epoch=%d vgp=%.6e (%s) updates_vgp=%d mean_net=%s updates_mean=%d',
+                epoch, lr_eta, opt_kind, int(running_debug.get('vgp_updates', 0)),
+                mean_status, int(running_debug.get('mean_updates', 0)))
             if last_eta_metrics is not None:
                 if 'log10_eta_rmse' in last_eta_metrics and math.isfinite(
                         float(last_eta_metrics.get('log10_eta_rmse', float('nan')))):
@@ -764,7 +903,8 @@ def main(pars):
                     'test_total': test_total,
                     'lr_vgp_eta': lr_eta,
                     'vgp_updates': int(running_debug.get('vgp_updates', 0)),
-                    'mean_net_frozen': 1,
+                    'mean_updates': int(running_debug.get('mean_updates', 0)),
+                    'mean_net_frozen': int(bool(freeze_mean)),
                     'kernel_amplitude': kd['amplitude'],
                     'kernel_length_scale': kd['length_scale'],
                     'kernel_length_scale_x': kd['length_scale_x'],
@@ -776,7 +916,12 @@ def main(pars):
                     row.update(last_eta_metrics)
                 metrics_writer.write_row(row)
 
-            payload = pack_vi_only_checkpoint(raw_model, optimizer_vgp, epoch, physics_approximation)
+            payload = pack_vi_only_checkpoint(
+                raw_model, optimizer_vgp, epoch, physics_approximation,
+                mean_net_frozen=freeze_mean,
+                optimizer_mean=optimizer_mean,
+                architecture=architecture,
+            )
             atomic_torch_save(payload, ckpt_file_new)
             atomic_torch_save(payload, ckpt_file_old)
             if metrics_writer is not None:

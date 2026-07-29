@@ -20,7 +20,7 @@ import torch
 
 import predict_torch as _predict
 from models_torch import JointModel, MeanNetwork, make_sparse_vgp, normalize_tensor
-from train_vi_only_torch import VI_ONLY_ARCHITECTURE
+from train_vi_only_torch import VI_ONLY_ARCHITECTURE, VI_ONLY_ARCHITECTURES
 from utilities_torch import (
     ParameterClass,
     checkpoint_path,
@@ -103,8 +103,10 @@ def main(argv):
     else:
         ckpt = checkpoint_choice
     state = torch_load_checkpoint(ckpt, map_location=device)
-    if state.get('architecture') != VI_ONLY_ARCHITECTURE:
-        raise RuntimeError(f'Expected VI-only architecture, got {state.get("architecture")!r}')
+    if state.get('architecture') not in VI_ONLY_ARCHITECTURES:
+        raise RuntimeError(
+            f'Expected VI-only architecture in {VI_ONLY_ARCHITECTURES}, '
+            f'got {state.get("architecture")!r}')
     model.load_state_dict(
         {k: v for k, v in state['model'].items() if not k.startswith('mean_net_ref.')},
         strict=False)

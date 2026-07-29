@@ -13,7 +13,7 @@ import torch
 
 import predict_torch as _predict
 from models_torch import JointModel, MeanNetwork, make_sparse_vgp, normalize_tensor
-from train_vi_only_torch import VI_ONLY_ARCHITECTURE
+from train_vi_only_torch import VI_ONLY_ARCHITECTURE, VI_ONLY_ARCHITECTURES
 from utilities_torch import (
     ParameterClass,
     checkpoint_path,
@@ -31,6 +31,16 @@ usage = """
 Usage: predict_vi_only_torch.py run_torch_vi_only.cfg [num_samples]
 """
 
+
+def _require_vi_only_architecture(checkpoint, checkpoint_file):
+    arch = checkpoint.get('architecture') if isinstance(checkpoint, dict) else None
+    outputs = tuple(checkpoint.get('mean_net_outputs', ())) if isinstance(checkpoint, dict) else ()
+    if arch not in VI_ONLY_ARCHITECTURES or outputs != _predict.MEAN_NET_OUTPUTS:
+        raise RuntimeError(
+            f'Checkpoint {checkpoint_file} was saved with architecture={arch!r}, '
+            f'mean_net_outputs={outputs!r}; expected one of {VI_ONLY_ARCHITECTURES}, '
+            f'mean_net_outputs={_predict.MEAN_NET_OUTPUTS!r}.'
+        )
 
 def main(pars, num_samples=None):
     torch_dtype = resolve_torch_dtype(pars.runtime.dtype)
@@ -54,7 +64,7 @@ def main(pars, num_samples=None):
     ckpt_file = checkpoint_path(pars.train.checkdir, pars.train.checkname_new)
     print(f'loaded checkpoint: {ckpt_file}')
     state = torch_load_checkpoint(ckpt_file, map_location=device)
-    _predict.require_joint_checkpoint_architecture(state, ckpt_file)
+    _require_vi_only_architecture(state, ckpt_file)
     model_state = {
         k: v for k, v in state['model'].items() if not k.startswith('mean_net_ref.')
     }
@@ -114,7 +124,7 @@ def main(pars, num_samples=None):
         h5.create_dataset('lambda_samples', data=lambda_samples)
         for key, val in preds.items():
             h5.create_dataset(key, data=val)
-        h5.attrs['architecture'] = VI_ONLY_ARCHITECTURE
+        h5.attrs['architecture'] = state.get('architecture', VI_ONLY_ARCHITECTURE)
         h5.attrs['kernel_type'] = vgp_eta.kernel_type
         h5.attrs['anisotropic'] = bool(vgp_eta.anisotropic)
         h5.attrs['num_inducing'] = int(vgp_eta.inducing_index_points.shape[0])

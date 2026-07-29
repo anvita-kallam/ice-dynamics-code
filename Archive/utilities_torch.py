@@ -186,6 +186,14 @@ physics_batch_size = 512
 data_scale = 1.0
 phys_scale = 2.0
 state_reg_scale = 1.0
+# SSA physics NLL reweight: grounded (τ_c>0) vs floating. Baseline 1/1.
+grounded_phys_weight = 1.0
+floating_phys_weight = 1.0
+# Global η intercept: False freezes eta_log_shift at 0 (spatial GP only).
+learn_eta_shift = True
+freeze_eta_log_shift = False
+# Sequential VI default: freeze PINN. Set False to also train u,v,s,H.
+freeze_mean_net = True
 # Soft log-η prior toward log(eta_prior_mean); blocks physics-driven η→0 collapse.
 # Keep mild (0.1–0.3) so the prior anchors the mean without flattening spatial η.
 eta_prior_scale = 0.2

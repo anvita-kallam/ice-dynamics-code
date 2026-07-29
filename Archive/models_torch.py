@@ -40,6 +40,30 @@ def inverse_normalize_tensor(xn, W, b, pos=False):
 def normal_log_prob(x, std):
     return -0.5 * math.log(2.0 * math.pi) - torch.log(std) - 0.5 * (x / std).square()
 
+
+def weighted_mean(values, weights):
+    """Mean of ``values`` with non-negative ``weights`` (normalized to sum 1).
+
+    Falls back to an unweighted mean if the weight sum is non-positive.
+    """
+    w_sum = weights.sum()
+    if float(w_sum.detach().item()) <= 0.0:
+        return values.mean()
+    return (values * weights).sum() / w_sum
+
+
+def grounded_floating_phys_weights(tau_c, pars, dtype):
+    """Per-point physics weights: grounded (τ_c>0) vs floating.
+
+    Controlled by train.grounded_phys_weight / train.floating_phys_weight (default 1/1).
+    """
+    train = getattr(pars, 'train', pars)
+    g_w = float(getattr(train, 'grounded_phys_weight', 1.0) or 1.0)
+    f_w = float(getattr(train, 'floating_phys_weight', 1.0) or 1.0)
+    grounded = (tau_c > 0).to(dtype=dtype)
+    return grounded * g_w + (1.0 - grounded) * f_w
+
+
 def grad(q, z):
     return torch.autograd.grad(
                 q.sum(), z,
@@ -987,12 +1011,14 @@ class JointModel(nn.Module):
                 if rh is not None:
                     self._update_debug_stats(debug_stats, 'rh', rh)
 
-            log_prob = normal_log_prob(rux, rx_std).mean()
-            log_prob = log_prob + normal_log_prob(rvy, ry_std).mean()
+            # Optional grounded/floating reweight (defaults 1/1 → identical to .mean()).
+            point_w = grounded_floating_phys_weights(tau_c, pars, torch_dtype)
+            log_prob = weighted_mean(normal_log_prob(rux, rx_std), point_w)
+            log_prob = log_prob + weighted_mean(normal_log_prob(rvy, ry_std), point_w)
             momentum_ll = momentum_ll + weights[i] * log_prob
             weighted_ll = weighted_ll + weights[i] * log_prob
             if rh is not None:
-                cont_prob = normal_log_prob(rh, rh_std).mean()
+                cont_prob = weighted_mean(normal_log_prob(rh, rh_std), point_w)
                 continuity_ll = continuity_ll + weights[i] * cont_prob
                 weighted_ll = weighted_ll + weights[i] * cont_prob
 
