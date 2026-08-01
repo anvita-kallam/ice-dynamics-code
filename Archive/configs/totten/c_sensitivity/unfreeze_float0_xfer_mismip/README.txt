@@ -1,0 +1,1 @@
+Transfer predict/eval: Totten unfreeze_float0 max_sliding → MISMIP more_sliding A20/A40.\nUses C=0.001 checkpoint. Cross-domain (Totten norms/inducing on MISMIP grid).\n

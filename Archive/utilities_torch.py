@@ -186,6 +186,12 @@ physics_batch_size = 512
 data_scale = 1.0
 phys_scale = 2.0
 state_reg_scale = 1.0
+# Per-channel multipliers inside state_reg (relative to state_reg_scale).
+# Raise H/s to pin geometry; lower u/v so basal C can still move velocity.
+state_reg_u_weight = 1.0
+state_reg_v_weight = 1.0
+state_reg_s_weight = 1.0
+state_reg_h_weight = 1.0
 # SSA physics NLL reweight: grounded (τ_c>0) vs floating. Baseline 1/1.
 grounded_phys_weight = 1.0
 floating_phys_weight = 1.0

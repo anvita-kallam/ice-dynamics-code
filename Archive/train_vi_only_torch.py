@@ -577,6 +577,33 @@ def main(pars):
         set_module_requires_grad(model.mean_net, True)
         model.mean_net.train()
 
+    # Frozen Stage-1 anchor for state regularization (always from pretrain
+    # weights when present). Without this, state_reg_scale is a no-op in VI-only.
+    state_reg_scale = float(getattr(pars.train, 'state_reg_scale', 0.0) or 0.0)
+    if state_reg_scale > 0.0:
+        mean_net_ref = MeanNetwork(norms, resnet=pars.pretrain.resnet, dtype=torch_dtype).to(device)
+        if Path(pretrain_ckpt).exists():
+            ref_state = torch_load_checkpoint(pretrain_ckpt, map_location=device)
+            mean_net_ref.load_state_dict(
+                checkpoint_model_state(ref_state, pretrain_ckpt), strict=True)
+        else:
+            mean_net_ref.load_state_dict(model.mean_net.state_dict(), strict=True)
+        mean_net_ref.eval()
+        for param in mean_net_ref.parameters():
+            param.requires_grad_(False)
+        model.set_mean_net_ref(mean_net_ref)
+        if rank == 0:
+            logging.info(
+                'attached frozen mean_net_ref for state regularization '
+                '(scale=%.4g u=%.3g v=%.3g s=%.3g h=%.3g) from %s',
+                state_reg_scale,
+                float(getattr(pars.train, 'state_reg_u_weight', 1.0) or 0.0),
+                float(getattr(pars.train, 'state_reg_v_weight', 1.0) or 0.0),
+                float(getattr(pars.train, 'state_reg_s_weight', 1.0) or 0.0),
+                float(getattr(pars.train, 'state_reg_h_weight', 1.0) or 0.0),
+                pretrain_ckpt if Path(pretrain_ckpt).exists() else 'current mean_net weights',
+            )
+
     if distributed:
         ddp_kwargs = {'device_ids': [local_rank], 'output_device': local_rank} if device.type == 'cuda' else {}
         ddp_kwargs['find_unused_parameters'] = True
@@ -601,13 +628,19 @@ def main(pars):
     if rank == 0:
         logging.info(
             'freeze_mean_net=%s architecture=%s mean_opt=%s mean_lr=%s '
-            'floating_phys_weight=%s grounded_phys_weight=%s',
+            'floating_phys_weight=%s grounded_phys_weight=%s '
+            'state_reg_scale=%s (u=%.3g v=%.3g s=%.3g h=%.3g)',
             freeze_mean,
             architecture,
             mean_opt_kind,
             None if freeze_mean else vgp_lrs['mean_net'],
             getattr(pars.train, 'floating_phys_weight', 1.0),
             getattr(pars.train, 'grounded_phys_weight', 1.0),
+            getattr(pars.train, 'state_reg_scale', 0.0),
+            float(getattr(pars.train, 'state_reg_u_weight', 1.0) or 0.0),
+            float(getattr(pars.train, 'state_reg_v_weight', 1.0) or 0.0),
+            float(getattr(pars.train, 'state_reg_s_weight', 1.0) or 0.0),
+            float(getattr(pars.train, 'state_reg_h_weight', 1.0) or 0.0),
         )
 
     ckpt_file_old = checkpoint_path(pars.train.checkdir, pars.train.checkname_old)

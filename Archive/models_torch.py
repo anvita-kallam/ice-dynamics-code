@@ -1068,7 +1068,9 @@ class JointModel(nn.Module):
 
         # Soft anchor toward the pretrained PINN state. Penalizes drift in
         # (u,v,s,H) so PDE residuals must be explained by η rather than by
-        # freely retuning the mean field.
+        # freely retuning the mean field. Channel weights default to 1; raise
+        # H/s and lower u/v to pin geometry while still allowing C to imprint
+        # on velocity (and therefore on η).
         state_reg = torch.zeros((), dtype=torch_dtype, device=batch_obs['x'].device)
         state_reg_scale = float(getattr(pars.train, 'state_reg_scale', 0.0) or 0.0)
         if self.mean_net_ref is not None and state_reg_scale > 0.0:
@@ -1078,10 +1080,14 @@ class JointModel(nn.Module):
                     batch_obs['u_in'], batch_obs['v_in'], batch_obs['s_in'], batch_obs['b_in'],
                     batch_obs['uv_mask'],
                     inverse_norm=False)
-            state_u = batch_obs['uv_mask'] * (up - ur).square()
-            state_v = batch_obs['uv_mask'] * (vp - vr).square()
-            state_s = (sp - sr).square()
-            state_h = (hp - hr).square()
+            wu = float(getattr(pars.train, 'state_reg_u_weight', 1.0) or 0.0)
+            wv = float(getattr(pars.train, 'state_reg_v_weight', 1.0) or 0.0)
+            ws = float(getattr(pars.train, 'state_reg_s_weight', 1.0) or 0.0)
+            wh = float(getattr(pars.train, 'state_reg_h_weight', 1.0) or 0.0)
+            state_u = wu * batch_obs['uv_mask'] * (up - ur).square()
+            state_v = wv * batch_obs['uv_mask'] * (vp - vr).square()
+            state_s = ws * (sp - sr).square()
+            state_h = wh * (hp - hr).square()
             state_reg = (state_u + state_v + state_s + state_h).sum() / torch.clamp(obs_weight, min=1.0)
 
         physics_out = self._physics_nll(
