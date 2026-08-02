@@ -115,17 +115,21 @@ def main() -> int:
         x_km = x[0, :] / 1.0e3
         y_km = y[:, 0] / 1.0e3
 
-    fig, axes = plt.subplots(1, 3, figsize=(14.5, 3.8), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(14.5, 4.4))
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.82, bottom=0.18, wspace=0.35)
+
+    xmin, xmax = float(np.nanmin(x_km)), float(np.nanmax(x_km))
+    ymin, ymax = float(np.nanmin(y_km)), float(np.nanmax(y_km))
 
     cmap = ListedColormap(["#c0392b", "#27ae60"])
     im = axes[0].pcolormesh(
         x_km, y_km, coverage_map, shading="auto", cmap=cmap, vmin=0.0, vmax=1.0)
-    axes[0].set_aspect("equal")
+    axes[0].set_xlim(xmin, xmax)
+    axes[0].set_ylim(ymin, ymax)
+    axes[0].set_aspect("equal", adjustable="box")
     axes[0].set_xlabel("x (km)")
     axes[0].set_ylabel("y (km)")
     axes[0].set_title(rf"within 1$\sigma$: {frac1:.1%} (n={n:,})")
-    cbar = fig.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04, ticks=[0.25, 0.75])
-    cbar.ax.set_yticklabels(["miss", "hit"])
 
     abs_z = np.abs(zscore[eval_mask])
     axes[1].hist(abs_z, bins=60, color="#4c78a8", alpha=0.85, edgecolor="none")
@@ -155,8 +159,17 @@ def main() -> int:
     axes[2].grid(True, alpha=0.3)
 
     fig.suptitle(args.title, fontsize=12)
+    fig.canvas.draw()
+    inv = fig.transFigure.inverted()
+    p0 = inv.transform(axes[0].transData.transform((xmin, ymin)))
+    p1 = inv.transform(axes[0].transData.transform((xmax, ymin)))
+    cbar_h, gap = 0.035, 0.12
+    cax = fig.add_axes([p0[0], p0[1] - gap - cbar_h, p1[0] - p0[0], cbar_h])
+    cbar = fig.colorbar(im, cax=cax, orientation="horizontal", ticks=[0.25, 0.75])
+    cbar.ax.set_xticklabels(["miss", "hit"])
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=150, bbox_inches="tight")
+    fig.savefig(args.output, dpi=150, bbox_inches="tight", pad_inches=0.2)
     print(f"wrote {args.output}")
     print(f"calibration_within_1sigma={frac1:.6f}")
     print(f"calibration_within_2sigma={frac2:.6f}")

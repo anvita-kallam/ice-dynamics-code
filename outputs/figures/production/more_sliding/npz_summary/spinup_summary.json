@@ -1,0 +1,18 @@
+{
+  "source": "/Users/anvitakallam/Ice Dynamics/outputs/spinup/production/more_sliding/SteadyState_more_sliding_10500yr_ramp4000_1refine_grid.npz",
+  "shape": [
+    161,
+    1281
+  ],
+  "C": 0.001,
+  "A": 20,
+  "mean_thickness_m": 448.28403071783293,
+  "min_thickness_m": 76.8539664719981,
+  "max_thickness_m": 807.9820947405607,
+  "mean_speed_m_per_yr": 259.8963644068511,
+  "max_speed_m_per_yr": 999.3242207824011,
+  "mean_viscosity_mpa_yr": 14.901605176951552,
+  "min_viscosity_mpa_yr": 2.043222030587686,
+  "max_viscosity_mpa_yr": 42.54678491012565,
+  "grounded_fraction_haf_positive": 0.8710343724089779
+}

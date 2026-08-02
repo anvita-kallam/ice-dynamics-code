@@ -1,0 +1,11 @@
+{
+  "source_npz": "/Users/anvitakallam/Ice Dynamics/outputs/spinup/production/more_sliding/SteadyState_more_sliding_10500yr_ramp4000_1refine_grid.npz",
+  "holdout_npz": "/Users/anvitakallam/Ice Dynamics/outputs/heldout_velocity_validation/dataset/grid_velocity_holdout_f0.2_s42.npz",
+  "holdout_mask_npz": "/Users/anvitakallam/Ice Dynamics/outputs/heldout_velocity_validation/dataset/holdout_mask_f0.2_s42.npz",
+  "holdout_fraction": 0.2,
+  "seed": 42,
+  "n_valid_velocity": 206241,
+  "n_holdout": 41248,
+  "n_train": 164993,
+  "holdout_fraction_realized": 0.19999903026071442
+}

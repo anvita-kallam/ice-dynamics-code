@@ -1,0 +1,39 @@
+{
+  "config": "configs/vi_only_eta_bias_suite/raised_prior_center_24_A40.cfg",
+  "checkpoint": "checkpoints/torch_vi_only/eta_bias_suite/eta_bias_v1/raised_prior_center_24_A40/model_best.pt",
+  "checkpoint_epoch": 284,
+  "n_points": 206238,
+  "log10_eta_rmse": 0.34492750193430116,
+  "log10_eta_bias": 0.0029848161373435293,
+  "log10_eta_r": 0.6627034400517408,
+  "rel_eta_rmse": 2.068791352559325,
+  "eta_pred_mean": 13.900655083050083,
+  "eta_ref_mean": 19.031044006382608,
+  "eta_mean_ratio": 0.730419995791513,
+  "eta_post_var_mean": 0.1839358249629171,
+  "eta_post_std_mean": 0.4252169843815762,
+  "eta_post_std_median": 0.43725489290464803,
+  "eta_post_std_p90": 0.490691583165337,
+  "log10_eta_post_std_mean": 0.18466938992845977,
+  "uncertainty_abs_error_spearman": -0.09346117914094262,
+  "calibration_within_1sigma": 0.3239655155693907,
+  "calibration_within_2sigma": 0.7174429542567325,
+  "state_rmse": {
+    "u": 112.5578390194863,
+    "v": 25.98575869092742,
+    "s": 681.3935148489858,
+    "h": 681.7680666146744,
+    "b": 162.99609675968716
+  },
+  "state_nrmse": 0.8078525382403046,
+  "kernel": {
+    "kernel_type": "matern32",
+    "anisotropic": 0.0,
+    "amplitude": 0.5159441585904652,
+    "length_scale": 0.2282929934812937,
+    "length_scale_x": 0.2282929934812937,
+    "length_scale_y": 0.2282929934812937,
+    "num_inducing": 784
+  },
+  "mean_equals_map_note": "Gaussian variational posterior: mean(\u03b8) used as MAP proxy"
+}

@@ -308,46 +308,70 @@ def save_figures(data: dict, metrics: dict, fig_dir: Path, stride: int) -> list[
         log_lo, log_hi = -1.0, 1.0
     log_diff_lim = max(abs(float(log_lo)), abs(float(log_hi)), 1e-3)
 
-    fig, axes = plt.subplots(2, 3, figsize=(13.5, 7.2), constrained_layout=True)
-    im00 = _add_map(axes[0, 0], x_km, y_km, eta_ref, r"Truth $\eta$ (spin-up)", cmap="magma", norm=eta_norm)
-    im01 = _add_map(axes[0, 1], x_km, y_km, eta_mean, r"Estimate $\eta$ (VI mean)", cmap="magma", norm=eta_norm)
-    im02 = _add_map(
+    fig, axes = plt.subplots(2, 3, figsize=(14.5, 7.8))
+
+    xmin = float(np.nanmin(x_km))
+    xmax = float(np.nanmax(x_km))
+    ymin = float(np.nanmin(y_km))
+    ymax = float(np.nanmax(y_km))
+
+    def _add_map_eq(ax, field, title, *, cmap="viridis", norm=None, clim=None):
+        im = _add_map(ax, x_km, y_km, field, title, cmap=cmap, norm=norm, clim=clim)
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.set_aspect("equal", adjustable="box")
+        return im
+
+    im00 = _add_map_eq(axes[0, 0], eta_ref, r"Truth $\eta$ (spin-up)", cmap="magma", norm=eta_norm)
+    im01 = _add_map_eq(axes[0, 1], eta_mean, r"Estimate $\eta$ (VI mean)", cmap="magma", norm=eta_norm)
+    im02 = _add_map_eq(
         axes[0, 2],
-        x_km,
-        y_km,
         eta_diff,
         r"Estimate − truth $\eta$",
         cmap="RdBu_r",
         norm=TwoSlopeNorm(vcenter=0.0, vmin=-diff_lim, vmax=diff_lim),
     )
-    fig.colorbar(im00, ax=axes[0, 0], fraction=0.046, pad=0.02, label=r"$\eta$ (MPa·yr)")
-    fig.colorbar(im01, ax=axes[0, 1], fraction=0.046, pad=0.02, label=r"$\eta$ (MPa·yr)")
-    fig.colorbar(im02, ax=axes[0, 2], fraction=0.046, pad=0.02, label=r"$\Delta\eta$")
-
-    im10 = _add_map(axes[1, 0], x_km, y_km, log_eta_ref, r"Truth $\log_{10}\eta$", cmap="magma")
-    im11 = _add_map(axes[1, 1], x_km, y_km, log_eta_mean, r"Estimate $\log_{10}\eta$", cmap="magma")
-    im12 = _add_map(
+    im10 = _add_map_eq(axes[1, 0], log_eta_ref, r"Truth $\log_{10}\eta$", cmap="magma")
+    im11 = _add_map_eq(axes[1, 1], log_eta_mean, r"Estimate $\log_{10}\eta$", cmap="magma")
+    im12 = _add_map_eq(
         axes[1, 2],
-        x_km,
-        y_km,
         log_eta_diff,
         r"$\log_{10}$ estimate − $\log_{10}$ truth",
         cmap="RdBu_r",
         norm=TwoSlopeNorm(vcenter=0.0, vmin=-log_diff_lim, vmax=log_diff_lim),
     )
-    # Match log color limits
     im10.set_clim(log_lo, log_hi)
     im11.set_clim(log_lo, log_hi)
-    fig.colorbar(im10, ax=axes[1, 0], fraction=0.046, pad=0.02)
-    fig.colorbar(im11, ax=axes[1, 1], fraction=0.046, pad=0.02)
-    fig.colorbar(im12, ax=axes[1, 2], fraction=0.046, pad=0.02)
+
+    panels = [
+        (axes[0, 0], im00, r"$\eta$ (MPa·yr)"),
+        (axes[0, 1], im01, r"$\eta$ (MPa·yr)"),
+        (axes[0, 2], im02, r"$\Delta\eta$"),
+        (axes[1, 0], im10, None),
+        (axes[1, 1], im11, None),
+        (axes[1, 2], im12, None),
+    ]
     fig.suptitle(
         rf"Viscosity recovery  |  $\log_{{10}}$ bias={metrics['log10_eta_bias']:.3f}, "
         rf"RMSE={metrics['log10_eta_rmse']:.3f}, $r$={metrics['log10_eta_r']:.3f}",
         fontsize=12,
     )
+    fig.subplots_adjust(left=0.055, right=0.995, top=0.90, bottom=0.18, wspace=0.28, hspace=0.72)
+    fig.canvas.draw()
+    inv = fig.transFigure.inverted()
+    cbar_h = 0.014
+    gap = 0.070
+    for ax, im, label in panels:
+        p0 = inv.transform(ax.transData.transform((xmin, ymin)))
+        p1 = inv.transform(ax.transData.transform((xmax, ymin)))
+        cax = fig.add_axes([p0[0], p0[1] - gap - cbar_h, p1[0] - p0[0], cbar_h])
+        cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
+        if label:
+            cbar.set_label(label, fontsize=9)
+        cbar.ax.tick_params(labelsize=8)
     path = fig_dir / "eta_truth_estimate_diff.png"
-    fig.savefig(path, dpi=150, bbox_inches="tight")
+    # Keep figure coordinates fixed so colorbars stay aligned with glacier width.
+    fig.savefig(path, dpi=150)
     plt.close(fig)
     saved.append(path)
 

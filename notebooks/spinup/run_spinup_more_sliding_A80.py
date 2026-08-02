@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 import time as walltime
 
 import numpy as np
@@ -1088,47 +1089,7 @@ def evaluate_function_on_grid(function, pts, values, *, block=50_000):
     return values
 
 
-def save_checkpoint_and_grid_npz(
-    mesh,
-    Q,
-    V,
-    fields,
-    bed_field,
-    cfg,
-):
-    h5_path, json_path, npz_path = checkpoint_paths(cfg)
-
-    u = firedrake.Function(V, name="u")
-    h = firedrake.Function(Q, name="h")
-    s = firedrake.Function(Q, name="s")
-    b = firedrake.Function(Q, name="b")
-
-    A_field = firedrake.Function(Q, name="A")
-
-    u.project(fields["velocity"])
-    h.project(fields["thickness"])
-    s.project(fields["surface"])
-    b.project(bed_field)
-    A_field.interpolate(Constant(cfg["A_field_saved_value"]))
-    
-    with firedrake.CheckpointFile(h5_path, "w") as checkpoint:
-        checkpoint.save_mesh(mesh)
-        checkpoint.save_function(u, name="velocity")
-        checkpoint.save_function(h, name="thickness")
-        checkpoint.save_function(s, name="surface")
-        checkpoint.save_function(b, name="bed")
-        checkpoint.save_function(A_field, name="A")
-        # checkpoint.save_function(eta_mpa_yr_func, name="eta_mpa_yr")
-
-    print(f"Saved steady-state checkpoint: {h5_path}", flush=True)
-
-    save_cfg(cfg, json_path, h5_path=h5_path)
-    save_spinup_history(
-        SPINUP_HISTORY,
-        os.path.join(save_dir, f"{stem}_history.json"),
-    )
-
-    # Save the same final state on a regular 2D grid for non-Firedrake workflows.
+def _write_grid_npz(mesh, Q, u, h, s, b, A_field, cfg, npz_path):
     mesh_coords = mesh.coordinates.dat.data_ro
     xmin, ymin = mesh_coords.min(axis=0)
     xmax, ymax = mesh_coords.max(axis=0)
@@ -1156,12 +1117,8 @@ def save_checkpoint_and_grid_npz(
     height_above_flotation = firedrake.Function(Q, name="height_above_flotation").interpolate(
         s - (1 - ρ_I / ρ_W) * h
     )
-    # viscosity_field = firedrake.project(
-    #     viscosity(velocity=u, thickness=h, fluidity=A),
-    #     Q,
-    # )
     eta_mpa_yr_func = firedrake.project(
-        effective_viscosity( velocity=u,fluidity=A,),
+        effective_viscosity(velocity=u, fluidity=A_field),
         Q,
     )
 
@@ -1178,8 +1135,7 @@ def save_checkpoint_and_grid_npz(
     U = u_vals.reshape(ny, nx, 2)
     Ux = U[..., 0]
     Uy = U[..., 1]
-    
-    # Includes both descriptive names and the legacy names used by run_sim.py.
+
     np.savez_compressed(
         npz_path,
         x=x,
@@ -1212,6 +1168,67 @@ def save_checkpoint_and_grid_npz(
         f"with shape (ny={ny}, nx={nx})",
         flush=True,
     )
+
+
+def export_grid_npz_from_h5(cfg, h5_path=None):
+    """Rebuild *_grid.npz from an existing steady-state HDF5."""
+    h5_path = h5_path or checkpoint_paths(cfg)[0]
+    _, json_path, npz_path = checkpoint_paths(cfg)
+    with firedrake.CheckpointFile(h5_path, "r") as checkpoint:
+        mesh = checkpoint.load_mesh()
+        u = checkpoint.load_function(mesh, name="velocity")
+        h = checkpoint.load_function(mesh, name="thickness")
+        s = checkpoint.load_function(mesh, name="surface")
+        b = checkpoint.load_function(mesh, name="bed")
+        A_field = checkpoint.load_function(mesh, name="A")
+    _write_grid_npz(mesh, h.function_space(), u, h, s, b, A_field, cfg, npz_path)
+    save_cfg(cfg, json_path, h5_path=h5_path)
+
+
+def save_checkpoint_and_grid_npz(
+    mesh,
+    Q,
+    V,
+    fields,
+    bed_field,
+    cfg,
+):
+    h5_path, json_path, npz_path = checkpoint_paths(cfg)
+    save_dir = cfg["save_dir"]
+    stem = cfg["output_stem"]
+
+    u = firedrake.Function(V, name="u")
+    h = firedrake.Function(Q, name="h")
+    s = firedrake.Function(Q, name="s")
+    b = firedrake.Function(Q, name="b")
+
+    A_field = firedrake.Function(Q, name="A")
+
+    u.project(fields["velocity"])
+    h.project(fields["thickness"])
+    s.project(fields["surface"])
+    b.project(bed_field)
+    A_field.interpolate(Constant(cfg["A_field_saved_value"]))
+    
+    with firedrake.CheckpointFile(h5_path, "w") as checkpoint:
+        checkpoint.save_mesh(mesh)
+        checkpoint.save_function(u, name="velocity")
+        checkpoint.save_function(h, name="thickness")
+        checkpoint.save_function(s, name="surface")
+        checkpoint.save_function(b, name="bed")
+        checkpoint.save_function(A_field, name="A")
+        # checkpoint.save_function(eta_mpa_yr_func, name="eta_mpa_yr")
+
+    print(f"Saved steady-state checkpoint: {h5_path}", flush=True)
+
+    save_cfg(cfg, json_path, h5_path=h5_path)
+    if SPINUP_HISTORY:
+        save_spinup_history(
+            SPINUP_HISTORY,
+            os.path.join(save_dir, f"{stem}_history.json"),
+        )
+
+    _write_grid_npz(mesh, Q, u, h, s, b, A_field, cfg, npz_path)
 
 
 save_checkpoint_and_grid_npz(

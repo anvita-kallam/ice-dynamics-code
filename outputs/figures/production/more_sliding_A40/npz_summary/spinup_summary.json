@@ -1,0 +1,18 @@
+{
+  "source": "outputs/spinup/production/more_sliding_A40/SteadyState_more_sliding_A40_10500yr_ramp4000_1refine_grid.npz",
+  "shape": [
+    161,
+    1281
+  ],
+  "C": 0.001,
+  "A": 40,
+  "mean_thickness_m": 979.9228211477451,
+  "min_thickness_m": 1.3901336439488303,
+  "max_thickness_m": 1728.5460549047255,
+  "mean_speed_m_per_yr": 247.41306906554257,
+  "max_speed_m_per_yr": 1222.0405967060772,
+  "mean_viscosity_mpa_yr": 19.03076553495589,
+  "min_viscosity_mpa_yr": -0.2120166372957941,
+  "max_viscosity_mpa_yr": 54.02397651165438,
+  "grounded_fraction_haf_positive": 0.761061088726296
+}

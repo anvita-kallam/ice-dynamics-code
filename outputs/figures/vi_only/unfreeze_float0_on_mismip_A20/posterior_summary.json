@@ -1,0 +1,39 @@
+{
+  "config": "configs/totten/c_sensitivity/unfreeze_float0_xfer_mismip/xfer_max_on_A20.cfg",
+  "checkpoint": "checkpoints/torch_vi_only/totten/c_sensitivity/unfreeze_float0/max_sliding/model.pt",
+  "checkpoint_epoch": 299,
+  "n_points": 206241,
+  "log10_eta_rmse": 0.7407518835377356,
+  "log10_eta_bias": -0.6830795254971391,
+  "log10_eta_r": -2.0410977652879214e-16,
+  "rel_eta_rmse": 0.7648393039184995,
+  "eta_pred_mean": 2.526471411317316,
+  "eta_ref_mean": 14.901605176951552,
+  "eta_mean_ratio": 0.16954357475696863,
+  "eta_post_var_mean": 6.367093113059687,
+  "eta_post_std_mean": 2.523309951840971,
+  "eta_post_std_median": 2.5233099518409716,
+  "eta_post_std_p90": 2.5233099518409716,
+  "log10_eta_post_std_mean": 1.0958595882160937,
+  "uncertainty_abs_error_spearman": -0.004947345384282361,
+  "calibration_within_1sigma": 0.932147342187053,
+  "calibration_within_2sigma": 1.0,
+  "state_rmse": {
+    "u": 4842.795689567699,
+    "v": 745.083208444733,
+    "s": 507.64358602055233,
+    "h": 1446.4255545637006,
+    "b": 1039.3181173991245
+  },
+  "state_nrmse": 13.367682633685911,
+  "kernel": {
+    "kernel_type": "matern32",
+    "anisotropic": 0.0,
+    "amplitude": 2.5233099518409716,
+    "length_scale": 0.21835279284137785,
+    "length_scale_x": 0.21835279284137785,
+    "length_scale_y": 0.21835279284137785,
+    "num_inducing": 784
+  },
+  "mean_equals_map_note": "Gaussian variational posterior: mean(\u03b8) used as MAP proxy"
+}

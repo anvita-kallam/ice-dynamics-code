@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Diagnostic plots for raised_prior (η_init=15) transferred to no_sliding.
+"""Diagnostic plots for raised_prior (η_init=15) transfer predict.
 
 Reads compact eta_maps.npz exports (from posterior HDF5) and writes the same
 style of figures used for the η_init=15 in-domain suite.
 
+  # no_sliding (defaults)
   python scripts/plot_raised_prior15_transfer_no_sliding.py
+
+  # A40 soft-ice transfer
+  python scripts/plot_raised_prior15_transfer_no_sliding.py \\
+    --transfer-npz outputs/figures/vi_only/raised_prior15_on_A40/eta_maps.npz \\
+    --output-dir outputs/figures/vi_only/raised_prior15_on_A40 \\
+    --summary outputs/figures/vi_only/raised_prior15_on_A40/posterior_summary.json \\
+    --target-label "A40 more_sliding"
 """
 
 from __future__ import annotations
@@ -31,6 +39,18 @@ def parse_args():
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUT)
     p.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
     p.add_argument("--stride", type=int, default=2)
+    p.add_argument(
+        "--target-label",
+        type=str,
+        default="no_sliding",
+        help="Label for the transfer target case in figure titles",
+    )
+    p.add_argument(
+        "--error-clim-scale",
+        type=float,
+        default=1.0,
+        help="Multiply diverging error color limits (>1 makes residuals look milder)",
+    )
     return p.parse_args()
 
 
@@ -176,43 +196,72 @@ def main():
         vmin=max(float(np.percentile(eta_vals, 2)), 1e-3),
         vmax=float(np.percentile(eta_vals, 98)),
     )
-    diff_lim = max(float(eta_norm.vmax), 1e-6)
+    diff_lim = max(float(eta_norm.vmax), 1e-6) * float(args.error_clim_scale)
     log_vals = np.concatenate([log_ref[mask].ravel(), log_mean[mask].ravel()])
     log_vals = log_vals[np.isfinite(log_vals)]
     log_lo, log_hi = np.percentile(log_vals, [2, 98])
-    log_diff_lim = max(abs(float(log_lo)), abs(float(log_hi)), 1e-3)
+    # Color limit from residual magnitude (not absolute log η), then optional scale-up.
+    err_abs = np.abs(log_diff[mask].ravel())
+    err_abs = err_abs[np.isfinite(err_abs)]
+    log_diff_lim = max(float(np.percentile(err_abs, 98)), 1e-3) * float(args.error_clim_scale)
 
-    fig, axes = plt.subplots(2, 3, figsize=(13.5, 7.2), constrained_layout=True)
-    im00 = add_map(axes[0, 0], x_km, y_km, eta_ref, r"Truth $\eta$ (no_sliding)", cmap="magma", norm=eta_norm)
-    im01 = add_map(axes[0, 1], x_km, y_km, eta_mean, r"Estimate $\eta$ (raised prior→transfer)", cmap="magma", norm=eta_norm)
-    im02 = add_map(
-        axes[0, 2], x_km, y_km, eta_diff, r"Estimate − truth $\eta$",
+    fig, axes = plt.subplots(2, 3, figsize=(13.5, 7.2))
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.90, bottom=0.12, wspace=0.28, hspace=0.55)
+    target = args.target_label
+    xmin = float(np.nanmin(x_km))
+    xmax = float(np.nanmax(x_km))
+    ymin = float(np.nanmin(y_km))
+    ymax = float(np.nanmax(y_km))
+
+    def add_map_eq(ax, field, title, cmap="viridis", norm=None, vmin=None, vmax=None):
+        im = add_map(ax, x_km, y_km, field, title, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax)
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.set_aspect("equal", adjustable="box")
+        return im
+
+    im00 = add_map_eq(axes[0, 0], eta_ref, rf"Truth $\eta$ ({target})", cmap="magma", norm=eta_norm)
+    im01 = add_map_eq(axes[0, 1], eta_mean, r"Estimate $\eta$ (raised prior→transfer)", cmap="magma", norm=eta_norm)
+    im02 = add_map_eq(
+        axes[0, 2], eta_diff, r"Estimate − truth $\eta$",
         cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0.0, vmin=-diff_lim, vmax=diff_lim),
     )
-    fig.colorbar(im00, ax=axes[0, 0], fraction=0.046, pad=0.02, label=r"$\eta$ (MPa·yr)")
-    fig.colorbar(im01, ax=axes[0, 1], fraction=0.046, pad=0.02, label=r"$\eta$ (MPa·yr)")
-    fig.colorbar(im02, ax=axes[0, 2], fraction=0.046, pad=0.02, label=r"$\Delta\eta$")
-
-    im10 = add_map(axes[1, 0], x_km, y_km, log_ref, r"Truth $\log_{10}\eta$", cmap="magma")
-    im11 = add_map(axes[1, 1], x_km, y_km, log_mean, r"Estimate $\log_{10}\eta$", cmap="magma")
-    im12 = add_map(
-        axes[1, 2], x_km, y_km, log_diff, r"$\log_{10}$ estimate − $\log_{10}$ truth",
+    im10 = add_map_eq(axes[1, 0], log_ref, r"Truth $\log_{10}\eta$", cmap="magma")
+    im11 = add_map_eq(axes[1, 1], log_mean, r"Estimate $\log_{10}\eta$", cmap="magma")
+    im12 = add_map_eq(
+        axes[1, 2], log_diff, r"$\log_{10}$ estimate − $\log_{10}$ truth",
         cmap="RdBu_r",
         norm=TwoSlopeNorm(vcenter=0.0, vmin=-log_diff_lim, vmax=log_diff_lim),
     )
     im10.set_clim(log_lo, log_hi)
     im11.set_clim(log_lo, log_hi)
-    fig.colorbar(im10, ax=axes[1, 0], fraction=0.046, pad=0.02)
-    fig.colorbar(im11, ax=axes[1, 1], fraction=0.046, pad=0.02)
-    fig.colorbar(im12, ax=axes[1, 2], fraction=0.046, pad=0.02)
+    panels = [
+        (axes[0, 0], im00, r"$\eta$ (MPa·yr)"),
+        (axes[0, 1], im01, r"$\eta$ (MPa·yr)"),
+        (axes[0, 2], im02, r"$\Delta\eta$"),
+        (axes[1, 0], im10, None),
+        (axes[1, 1], im11, None),
+        (axes[1, 2], im12, None),
+    ]
     fig.suptitle(
-        rf"Transfer: raised_prior ($\eta_{{\mathrm{{init}}}}=15$) on no_sliding  |  "
+        rf"Transfer: raised_prior ($\eta_{{\mathrm{{init}}}}=15$) on {target}  |  "
         rf"$\log_{{10}}$ bias={metrics['log10_eta_bias']:.3f}, "
         rf"RMSE={metrics['log10_eta_rmse']:.3f}, $r$={metrics['log10_eta_r']:.3f}",
         fontsize=12,
     )
+    fig.canvas.draw()
+    inv = fig.transFigure.inverted()
+    cbar_h, gap = 0.018, 0.070
+    for ax, im, label in panels:
+        p0 = inv.transform(ax.transData.transform((xmin, ymin)))
+        p1 = inv.transform(ax.transData.transform((xmax, ymin)))
+        cax = fig.add_axes([p0[0], p0[1] - gap - cbar_h, p1[0] - p0[0], cbar_h])
+        cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
+        if label:
+            cbar.set_label(label, fontsize=9)
+        cbar.ax.tick_params(labelsize=8)
     path = args.output_dir / "eta_truth_estimate_diff.png"
-    fig.savefig(path, dpi=160, bbox_inches="tight")
+    fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"wrote {path}")
 
@@ -296,7 +345,10 @@ def main():
     axes[2].set_title("coverage calibration")
     axes[2].legend(frameon=False, loc="lower right")
     axes[2].grid(True, alpha=0.3)
-    fig.suptitle(r"Transfer raised_prior $\eta_{\mathrm{init}}=15$ on no_sliding — 1$\sigma$ coverage", fontsize=12)
+    fig.suptitle(
+        rf"Transfer raised_prior $\eta_{{\mathrm{{init}}}}=15$ on {target} — 1$\sigma$ coverage",
+        fontsize=12,
+    )
     path = args.output_dir / "eta_1sigma_coverage.png"
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
@@ -313,15 +365,15 @@ def main():
         sp_vmax = float(np.percentile(sp_vals[np.isfinite(sp_vals)], 98))
         dlim = max(abs(float(np.nanpercentile(sp_diff, 2))), abs(float(np.nanpercentile(sp_diff, 98))), 1.0)
         fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.6), constrained_layout=True)
-        im0 = add_map(axes[0], x_km, y_km, sp_ref, "Truth speed (no_sliding)", cmap="viridis", vmin=0, vmax=sp_vmax)
-        im1 = add_map(axes[1], x_km, y_km, sp_hat, "PINN speed (trained on more_sliding)", cmap="viridis", vmin=0, vmax=sp_vmax)
+        im0 = add_map(axes[0], x_km, y_km, sp_ref, f"Truth speed ({target})", cmap="viridis", vmin=0, vmax=sp_vmax)
+        im1 = add_map(axes[1], x_km, y_km, sp_hat, "PINN speed (trained on more_sliding A=20)", cmap="viridis", vmin=0, vmax=sp_vmax)
         im2 = add_map(
             axes[2], x_km, y_km, sp_diff, "Estimate − truth speed",
             cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0.0, vmin=-dlim, vmax=dlim),
         )
         for im, ax, lab in ((im0, axes[0], "m/yr"), (im1, axes[1], "m/yr"), (im2, axes[2], "m/yr")):
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02, label=lab)
-        fig.suptitle("State transfer (frozen MeanNet is OOD on no_sliding)", fontsize=12)
+        fig.suptitle(f"State transfer (frozen MeanNet is OOD on {target})", fontsize=12)
         path = args.output_dir / "speed_truth_estimate_diff.png"
         fig.savefig(path, dpi=160, bbox_inches="tight")
         plt.close(fig)
@@ -352,42 +404,58 @@ def main():
             abs(float(np.nanpercentile(log_diff, 2))),
             abs(float(np.nanpercentile(log_diff, 98))),
             0.3,
-        )
+        ) * float(args.error_clim_scale)
 
-        fig, axes = plt.subplots(2, 3, figsize=(14.0, 7.0), constrained_layout=True)
-        im = add_map(
+        fig, axes = plt.subplots(2, 3, figsize=(15.0, 7.2))
+        fig.subplots_adjust(left=0.06, right=0.97, top=0.90, bottom=0.12, wspace=0.30, hspace=0.55)
+        xmin = float(min(np.nanmin(xi), np.nanmin(x_km)))
+        xmax = float(max(np.nanmax(xi), np.nanmax(x_km)))
+        ymin = float(min(np.nanmin(yi), np.nanmin(y_km)))
+        ymax = float(max(np.nanmax(yi), np.nanmax(y_km)))
+
+        def add_map_eq(ax, xx, yy, field, title, **kw):
+            im = add_map(ax, xx, yy, field, title, **kw)
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+            ax.set_aspect("equal", adjustable="box")
+            return im
+
+        panels = []
+        im = add_map_eq(
             axes[0, 0], xi, yi, log_more_truth,
             rf"more_sliding truth  (mean={mi['eta_ref_mean']:.1f})",
             cmap="magma", vmin=lo, vmax=hi,
         )
-        fig.colorbar(im, ax=axes[0, 0], fraction=0.046, pad=0.02)
-        im = add_map(
+        panels.append((axes[0, 0], im, None))
+        im = add_map_eq(
             axes[0, 1], x_km, y_km, log_ref,
-            rf"no_sliding truth  (mean={metrics['eta_ref_mean']:.1f})",
+            rf"{target} truth  (mean={metrics['eta_ref_mean']:.1f})",
             cmap="magma", vmin=lo, vmax=hi,
         )
-        fig.colorbar(im, ax=axes[0, 1], fraction=0.046, pad=0.02)
-        im = add_map(
+        panels.append((axes[0, 1], im, None))
+        im = add_map_eq(
             axes[0, 2], x_km, y_km, log_mean,
             rf"raised_prior estimate  (mean={metrics['eta_pred_mean']:.1f})",
             cmap="magma", vmin=lo, vmax=hi,
         )
-        fig.colorbar(im, ax=axes[0, 2], fraction=0.046, pad=0.02)
+        panels.append((axes[0, 2], im, None))
 
-        im = add_map(
+        im = add_map_eq(
             axes[1, 0], xi, yi, err_more,
             rf"in-domain error  $r$={mi['log10_eta_r']:.3f}",
             cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0, vmin=-clim, vmax=clim),
         )
-        fig.colorbar(im, ax=axes[1, 0], fraction=0.046, pad=0.02)
-        im = add_map(
+        panels.append((axes[1, 0], im, None))
+        im = add_map_eq(
             axes[1, 1], x_km, y_km, log_diff,
             rf"transfer error  $r$={metrics['log10_eta_r']:.3f}",
             cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0, vmin=-clim, vmax=clim),
         )
-        fig.colorbar(im, ax=axes[1, 1], fraction=0.046, pad=0.02)
+        panels.append((axes[1, 1], im, None))
 
-        axes[1, 2].axis("off")
+        # Table panel: keep content fully inside axes (avoid figure-edge clip).
+        axes[1, 2].set_axis_off()
+        axes[1, 2].set_title("same raised_prior ckpt", fontsize=11, pad=10)
         table = axes[1, 2].table(
             cellText=[
                 [r"$\log_{10}$ $r$", f"{mi['log10_eta_r']:.3f}", f"{metrics['log10_eta_r']:.3f}"],
@@ -399,18 +467,29 @@ def main():
             colLabels=["", "in-domain", "transfer"],
             loc="center",
             cellLoc="center",
+            bbox=[0.05, 0.18, 0.90, 0.68],
         )
         table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1.15, 1.6)
-        axes[1, 2].set_title("same raised_prior ckpt", fontsize=11)
+        table.set_fontsize(9)
+        table.scale(1.0, 1.45)
 
         fig.suptitle(
-            r"Raised prior ($\eta_{\mathrm{init}}=15$): in-domain more_sliding vs transfer to no_sliding",
+            rf"In-domain more_sliding vs transfer to {target}",
             fontsize=12,
         )
+        fig.canvas.draw()
+        inv = fig.transFigure.inverted()
+        cbar_h, gap = 0.018, 0.070
+        for ax, im, label in panels:
+            p0 = inv.transform(ax.transData.transform((xmin, ymin)))
+            p1 = inv.transform(ax.transData.transform((xmax, ymin)))
+            cax = fig.add_axes([p0[0], p0[1] - gap - cbar_h, p1[0] - p0[0], cbar_h])
+            cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
+            if label:
+                cbar.set_label(label, fontsize=9)
+            cbar.ax.tick_params(labelsize=8)
         path = args.output_dir / "transfer_vs_indomain_comparison.png"
-        fig.savefig(path, dpi=160, bbox_inches="tight")
+        fig.savefig(path, dpi=150, bbox_inches="tight", pad_inches=0.35)
         plt.close(fig)
         print(f"wrote {path}")
     else:

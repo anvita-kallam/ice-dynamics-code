@@ -1,0 +1,39 @@
+{
+  "config": "configs/mismip/unfreeze_float0/run_torch_vi_only_A40.cfg",
+  "checkpoint": "checkpoints/torch_vi_only/mismip/unfreeze_float0/more_sliding_A40/model_best.pt",
+  "checkpoint_epoch": 39,
+  "n_points": 206238,
+  "log10_eta_rmse": 0.3779833428789198,
+  "log10_eta_bias": -0.22639366841359745,
+  "log10_eta_r": 0.7308138843098818,
+  "rel_eta_rmse": 0.6802765152483581,
+  "eta_pred_mean": 8.551542304707171,
+  "eta_ref_mean": 19.031044006382608,
+  "eta_mean_ratio": 0.4493469881021328,
+  "eta_post_var_mean": 1.7181775177372995,
+  "eta_post_std_mean": 1.3035365438385835,
+  "eta_post_std_median": 1.3378729566346492,
+  "eta_post_std_p90": 1.4362529628056768,
+  "log10_eta_post_std_mean": 0.5661187279483331,
+  "uncertainty_abs_error_spearman": 0.2055660613482778,
+  "calibration_within_1sigma": 0.9033834695836849,
+  "calibration_within_2sigma": 0.9981235271870363,
+  "state_rmse": {
+    "u": 82.08476379235967,
+    "v": 22.81301952217074,
+    "s": 633.1597561583259,
+    "h": 578.7234249769947,
+    "b": 259.6673201992545
+  },
+  "state_nrmse": 0.7855763718417819,
+  "kernel": {
+    "kernel_type": "matern32",
+    "anisotropic": 0.0,
+    "amplitude": 1.4446649333395378,
+    "length_scale": 0.11123375221712856,
+    "length_scale_x": 0.11123375221712856,
+    "length_scale_y": 0.11123375221712856,
+    "num_inducing": 784
+  },
+  "mean_equals_map_note": "Gaussian variational posterior: mean(\u03b8) used as MAP proxy"
+}
