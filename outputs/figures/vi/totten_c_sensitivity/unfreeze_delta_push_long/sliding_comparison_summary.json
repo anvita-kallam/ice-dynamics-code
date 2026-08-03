@@ -1,0 +1,91 @@
+{
+  "no_sliding": {
+    "cfg": "configs/totten/c_sensitivity/unfreeze_delta_push_long/run_torch_vi_only_totten_no_sliding.cfg",
+    "checkpoint": "checkpoints/torch_vi_only/totten/c_sensitivity/unfreeze_delta_push_long/no_sliding/model.pt",
+    "epoch": 899,
+    "friction_C": 100.0,
+    "eta_init": 15.0,
+    "eta_log_shift": -3.8170226415533484,
+    "eta_mean": {
+      "name": "eta",
+      "count": 26190,
+      "min": 0.037062516113139155,
+      "p05": 0.13846301313355777,
+      "median": 0.271261186978673,
+      "p95": 0.47162611887763983,
+      "max": 0.7668385375730161,
+      "mean": 0.2817342840553744
+    },
+    "log10_std": {
+      "name": "log10_std",
+      "count": 26190,
+      "min": 0.198553210331245,
+      "p05": 0.2933025578489986,
+      "median": 0.533418311477967,
+      "p95": 0.8973365164026333,
+      "max": 1.05477891049288,
+      "mean": 0.5567864162810364
+    },
+    "kernel": {
+      "kernel_type": "matern32",
+      "anisotropic": 0.0,
+      "amplitude": 2.1666872142358717,
+      "length_scale": 0.11832389408437786,
+      "length_scale_x": 0.11832389408437786,
+      "length_scale_y": 0.11832389408437786,
+      "num_inducing": 784
+    }
+  },
+  "max_sliding": {
+    "cfg": "configs/totten/c_sensitivity/unfreeze_delta_push_long/run_torch_vi_only_totten_max_sliding.cfg",
+    "checkpoint": "checkpoints/torch_vi_only/totten/c_sensitivity/unfreeze_delta_push_long/max_sliding/model.pt",
+    "epoch": 899,
+    "friction_C": 0.001,
+    "eta_init": 15.0,
+    "eta_log_shift": -3.097093669226495,
+    "eta_mean": {
+      "name": "eta",
+      "count": 26190,
+      "min": 0.07340360272521776,
+      "p05": 0.18180408239386997,
+      "median": 0.49754804614416626,
+      "p95": 0.9872461132274146,
+      "max": 2.1158025990817193,
+      "mean": 0.5372843882419324
+    },
+    "log10_std": {
+      "name": "log10_std",
+      "count": 26190,
+      "min": 0.09291763738031557,
+      "p05": 0.15316799363449127,
+      "median": 0.31620649081694924,
+      "p95": 0.8014475358084814,
+      "max": 1.4007422275502601,
+      "mean": 0.3955762660408055
+    },
+    "kernel": {
+      "kernel_type": "matern32",
+      "anisotropic": 0.0,
+      "amplitude": 1.9772803488679034,
+      "length_scale": 0.18985786363426446,
+      "length_scale_x": 0.18985786363426446,
+      "length_scale_y": 0.18985786363426446,
+      "num_inducing": 784
+    }
+  },
+  "comparison": {
+    "log10_eta_corr": 0.6630715857427343,
+    "median_log10_eta_diff_no_minus_max": -0.2639847762310422,
+    "median_eta_diff_max_minus_no": 0.21953141994513892,
+    "median_eta_ratio_no_over_max": 0.5445217401886466,
+    "median_log10_std_diff_no_minus_max": 0.16589882597734878,
+    "mean_abs_log10_eta_diff": 0.2674098538261155,
+    "mean_abs_eta_diff_max_minus_no": 0.26144235559202655
+  },
+  "figures": [
+    "../outputs/figures/vi/totten_c_sensitivity/unfreeze_delta_push_long/eta_mean_std_comparison.png",
+    "../outputs/figures/vi/totten_c_sensitivity/unfreeze_delta_push_long/eta_viscosity_no_vs_max.png",
+    "../outputs/figures/vi/totten_c_sensitivity/unfreeze_delta_push_long/eta_sliding_diagnostics.png",
+    "../outputs/figures/vi/totten_c_sensitivity/unfreeze_delta_push_long/eta_mean_log_ratio.png"
+  ]
+}

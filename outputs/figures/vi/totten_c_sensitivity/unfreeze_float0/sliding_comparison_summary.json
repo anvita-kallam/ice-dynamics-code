@@ -1,0 +1,91 @@
+{
+  "no_sliding": {
+    "cfg": "configs/totten/c_sensitivity/unfreeze_float0/run_torch_vi_only_totten_no_sliding.cfg",
+    "checkpoint": "checkpoints/torch_vi_only/totten/c_sensitivity/unfreeze_float0/no_sliding/model.pt",
+    "epoch": 299,
+    "friction_C": 100.0,
+    "eta_init": 15.0,
+    "eta_log_shift": -1.023075445685842,
+    "eta_mean": {
+      "name": "eta",
+      "count": 26190,
+      "min": 2.736309078872998,
+      "p05": 3.9830984171870827,
+      "median": 4.934141208974047,
+      "p95": 5.669689012823383,
+      "max": 7.41628442504359,
+      "mean": 4.89253051826214
+    },
+    "log10_std": {
+      "name": "log10_std",
+      "count": 26190,
+      "min": 0.4624199882667939,
+      "p05": 0.5959692900796761,
+      "median": 0.7313156765153773,
+      "p95": 0.8334926349125955,
+      "max": 1.124311604147474,
+      "mean": 0.7251812578152369
+    },
+    "kernel": {
+      "kernel_type": "matern32",
+      "anisotropic": 0.0,
+      "amplitude": 1.759858954485836,
+      "length_scale": 0.1696639046494507,
+      "length_scale_x": 0.1696639046494507,
+      "length_scale_y": 0.1696639046494507,
+      "num_inducing": 784
+    }
+  },
+  "max_sliding": {
+    "cfg": "configs/totten/c_sensitivity/unfreeze_float0/run_torch_vi_only_totten_max_sliding.cfg",
+    "checkpoint": "checkpoints/torch_vi_only/totten/c_sensitivity/unfreeze_float0/max_sliding/model.pt",
+    "epoch": 299,
+    "friction_C": 0.001,
+    "eta_init": 15.0,
+    "eta_log_shift": -1.781226570944877,
+    "eta_mean": {
+      "name": "eta",
+      "count": 26190,
+      "min": 1.059096501611998,
+      "p05": 1.3944729277855858,
+      "median": 2.12034943862542,
+      "p95": 2.693167649900969,
+      "max": 3.399793904460845,
+      "mean": 2.0915803143533327
+    },
+    "log10_std": {
+      "name": "log10_std",
+      "count": 26190,
+      "min": 0.296244580136489,
+      "p05": 0.3853929447261299,
+      "median": 0.6805380109335054,
+      "p95": 0.9845675065701269,
+      "max": 1.3544238285040906,
+      "mean": 0.6769131119117061
+    },
+    "kernel": {
+      "kernel_type": "matern32",
+      "anisotropic": 0.0,
+      "amplitude": 2.5233099518409716,
+      "length_scale": 0.21835279284137785,
+      "length_scale_x": 0.21835279284137785,
+      "length_scale_y": 0.21835279284137785,
+      "num_inducing": 784
+    }
+  },
+  "comparison": {
+    "log10_eta_corr": 0.48530490106999447,
+    "median_log10_eta_diff_no_minus_max": 0.365311264485309,
+    "median_eta_diff_max_minus_no": -2.846156410411115,
+    "median_eta_ratio_no_over_max": 2.3190561521214312,
+    "median_log10_std_diff_no_minus_max": 0.05154028285784845,
+    "mean_abs_log10_eta_diff": 0.3753909620931474,
+    "mean_abs_eta_diff_max_minus_no": 2.8009502039088066
+  },
+  "figures": [
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_float0/eta_mean_std_comparison.png",
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_float0/eta_viscosity_no_vs_max.png",
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_float0/eta_sliding_diagnostics.png",
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_float0/eta_mean_log_ratio.png"
+  ]
+}

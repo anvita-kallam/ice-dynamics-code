@@ -1,0 +1,102 @@
+{
+  "tag": "unfreeze_state_reg",
+  "no_sliding_cfg": "configs/totten/c_sensitivity/unfreeze_state_reg/run_torch_vi_only_totten_no_sliding.cfg",
+  "max_sliding_cfg": "configs/totten/c_sensitivity/unfreeze_state_reg/run_torch_vi_only_totten_max_sliding.cfg",
+  "frac_grounded": 0.2947308132875143,
+  "eta_stats_full": {
+    "no": {
+      "n": 26190,
+      "mean": 1.89493303210489,
+      "median": 1.9096247874317653,
+      "std": 0.29682635883295017,
+      "min": 1.043561467265952,
+      "max": 3.0090961995259584,
+      "max_over_min": 2.883487263485831,
+      "log10_range": 0.4599180374496946
+    },
+    "max": {
+      "n": 26190,
+      "mean": 2.0399803055134096,
+      "median": 2.0875050044091092,
+      "std": 0.3860155386825679,
+      "min": 0.9190343086339513,
+      "max": 3.794571925128817,
+      "max_over_min": 4.12886862816803,
+      "log10_range": 0.6158310647663557
+    }
+  },
+  "eta_stats_grounded": {
+    "no": {
+      "n": 7719,
+      "mean": 2.025493730466922,
+      "median": 2.060465224508991,
+      "std": 0.27210146319589945,
+      "min": 1.043561467265952,
+      "max": 3.0090961995259584,
+      "max_over_min": 2.883487263485831,
+      "log10_range": 0.4599180374496946
+    },
+    "max": {
+      "n": 7719,
+      "mean": 2.152409771060568,
+      "median": 2.2135227438919483,
+      "std": 0.3282617435784378,
+      "min": 1.0826995754211324,
+      "max": 3.130995565171857,
+      "max_over_min": 2.8918415008651026,
+      "log10_range": 0.46117448599938216
+    }
+  },
+  "eta_stats_floating": {
+    "no": {
+      "n": 18471,
+      "mean": 1.8403719346734286,
+      "median": 1.8391267905890998,
+      "std": 0.28962714207963497,
+      "min": 1.0454494934750052,
+      "max": 2.6646873326216567,
+      "max_over_min": 2.548843678487434,
+      "log10_range": 0.40634320084701814
+    },
+    "max": {
+      "n": 18471,
+      "mean": 1.9929962199436781,
+      "median": 2.0211721918405643,
+      "std": 0.39844363653626713,
+      "min": 0.9190343086339513,
+      "max": 3.794571925128817,
+      "max_over_min": 4.12886862816803,
+      "log10_range": 0.6158310647663557
+    }
+  },
+  "log10_eta_corr_full": 0.6707050122910794,
+  "log10_eta_corr_grounded": 0.6552019497029336,
+  "log10_eta_corr_floating": 0.6562093156436778,
+  "delta_eta": {
+    "mean_abs_full": 0.25159087091847904,
+    "mean_abs_grounded": 0.22477214319196384,
+    "mean_abs_floating": 0.26279837237053744,
+    "max_abs_full": 2.0613216360681292,
+    "max_abs_grounded": 1.0240754188619667,
+    "median_abs_grounded": 0.17932054224104022
+  },
+  "eta_log_shift": {
+    "no": -1.8694794924152165,
+    "max": -1.8296035795259966
+  },
+  "losses": {
+    "no": {
+      "metrics_csv": "logs/metrics_vi_only_log_vi_only_totten_c_sens_unfreeze_state_reg_no_sliding.csv",
+      "error": "No module named 'pandas'"
+    },
+    "max": {
+      "metrics_csv": "logs/metrics_vi_only_log_vi_only_totten_c_sens_unfreeze_state_reg_max_sliding.csv",
+      "error": "No module named 'pandas'"
+    }
+  },
+  "figures": [
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_state_reg/delta_eta_grounded.png",
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_state_reg/eta_corr_full_vs_grounded.png",
+    "/home/t-9akall/ice-dynamics/outputs/figures/vi/totten_c_sensitivity/unfreeze_state_reg/ssa_residual_decomposition.png"
+  ]
+}

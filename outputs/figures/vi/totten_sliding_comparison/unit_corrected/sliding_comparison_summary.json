@@ -1,0 +1,50 @@
+{
+  "source_npz": "/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/eta_maps.npz",
+  "eta_min_MPa_yr": 0.001,
+  "eta_max_MPa_yr": 10000.0,
+  "friction_C_no": 100.0,
+  "friction_C_max": 0.001,
+  "no_sliding": {
+    "n": 26190,
+    "min": 0.3717724993429939,
+    "median": 0.8862143429419189,
+    "mean": 0.9449976637059706,
+    "max": 3.5769330201196823,
+    "std": 0.28579697230941037,
+    "max_over_min": 9.621295352509753,
+    "log10_range": 0.9832335467337883,
+    "frac_at_floor": 0.0,
+    "frac_le_1": 0.6645666284841543
+  },
+  "max_sliding": {
+    "n": 26190,
+    "min": 0.45817732974775177,
+    "median": 0.8714820169645714,
+    "mean": 0.9288970203702376,
+    "max": 2.0858320868161218,
+    "std": 0.2658906854666421,
+    "max_over_min": 4.552455897293021,
+    "log10_range": 0.6582457471841341,
+    "frac_at_floor": 0.0,
+    "frac_le_1": 0.6838487972508591
+  },
+  "comparison": {
+    "log10_eta_corr": 0.9658789567286117,
+    "mean_abs_eta_diff_max_minus_no": 0.03595923696043594,
+    "median_eta_diff_max_minus_no": 0.00011077313813900869,
+    "mean_abs_log10_eta_diff": 0.015441787341498456
+  },
+  "meta_from_training": {
+    "no_shift": -2.113192104336469,
+    "max_shift": -2.111700793816206,
+    "no_epoch": 299,
+    "max_epoch": 299
+  },
+  "figures": [
+    "/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/unit_corrected/eta_mean_std_comparison.png",
+    "/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/unit_corrected/eta_viscosity_no_vs_max.png",
+    "/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/unit_corrected/eta_viscosity_no_vs_max_Pa_s.png",
+    "/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/unit_corrected/eta_sliding_diagnostics.png",
+    "/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/unit_corrected/eta_mean_log_ratio.png"
+  ]
+}

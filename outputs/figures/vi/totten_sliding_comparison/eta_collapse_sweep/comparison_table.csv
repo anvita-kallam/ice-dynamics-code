@@ -1,0 +1,7 @@
+name,metrics_source,status,mean_eta,median_eta,max_over_min,frac_at_eta_min,log10_dynamic_range,final_phys,final_kl,eta_std,eta_log_shift,frac_floor_grounded
+baseline_eta_init_15_log_clamp,/Users/anvitakallam/Ice Dynamics/outputs/figures/vi/totten_sliding_comparison/eta_maps.npz,baseline_maps,1.0993388535223745,1.0,3.194359952010356,0.5876670484917907,0.5043838524298512,-9.079181262534906,0.2846446417172403,0.18362912733440104,nan,nan
+eta_init_20_log_clamp,,missing,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
+eta_init_25_log_clamp,,missing,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
+eta_init_30_log_clamp,,missing,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
+eta_init_15_softplus_floor,,missing,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
+eta_init_20_softplus_floor,,missing,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan

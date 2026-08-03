@@ -1,0 +1,322 @@
+{
+  "task3_units": {
+    "convention": "icepack (m, yr, MPa) \u2014 see models_torch.icepack_ssa_constants",
+    "year_s": 31557600.0,
+    "g_raw_comment": "g = 9.81 * year**2 (NOT bare 9.81)",
+    "g_icepack": 9769603575225600.0,
+    "rho_ice_icepack": 9.207917118369125e-19,
+    "rho_g_MPa_per_m": 0.00899577,
+    "rho_g_SI_Pa_per_m": 8995.77,
+    "rho_g_ratio_SI_over_icepack": 1000000.0,
+    "expected_ratio": 1000000.0,
+    "rho_g_consistent": true,
+    "field_units": {
+      "velocity": "m/yr",
+      "strain_rate": "1/yr",
+      "viscosity_eta": "MPa\u00b7yr (exponential: exp(log(eta_init)+shift+\u03b8))",
+      "fluidity_A": "MPa^{-n} yr^{-1} (SI A * year * 1e18)",
+      "driving_stress": "MPa",
+      "basal_drag": "MPa",
+      "membrane_div": "MPa",
+      "SSA_residual": "MPa",
+      "ssa_r*_std": "0.06 MPa (likelihood scale)"
+    },
+    "membrane_dimensional_check": "H[m] * \u03b7[MPa\u00b7yr] * \u2207u[1/yr] \u2192 MPa\u00b7m; \u2207\u00b7(\u00b7) \u2192 MPa",
+    "verdict": "Equation loss is dimensionally consistent in the icepack MPa system. Bare g=9.81 is NOT used in SSA; g and \u03c1 are year-scaled so \u03c1g = SI/1e6. No additional gravity rescaling is required after switching to exp \u03b7 in MPa\u00b7yr."
+  },
+  "task1_c_propagation": {
+    "no_sliding": {
+      "cfg": "/Users/anvitakallam/Ice Dynamics/Archive/configs/totten/run_torch_vi_only_totten_no_sliding.cfg",
+      "note": "torch path unavailable (ModuleNotFoundError(\"No module named 'torch'\")); using ConfigParser value",
+      "pars.prior.friction_C": 100.0,
+      "pars.prior.friction_c": 100.0,
+      "icepack_ssa_constants.friction_C": 100.0,
+      "pipeline_steps": [
+        "1. ConfigParser optionxform=str preserves friction_C case (utilities_torch.ParameterClass)",
+        "2. pars.prior.friction_C set from cfg; lowercase alias friction_c also synced",
+        "3. Totten NPZ omits C \u2014 no cfg_json override of friction_C",
+        "4. icepack_ssa_constants(pars) \u2192 torch tensor friction_C",
+        "5. JointModel._physics_nll_ssa reads icepack['friction_C']",
+        "6. spinup_plastic_basal_drag(..., friction_C, ...) \u2192 basal_drag_{x,y}",
+        "7. SSA residual r = membrane_div(\u03b7) + \u03c4_d \u2212 basal_drag(C)",
+        "8. physics_nll = \u2212log N(r; \u03c3); phys_scale * physics_nll enters total loss",
+        "9. Gradients: C is constant (no C grads); \u03b7 VGP gets \u2202L/\u2202\u03b7 via membrane; C changes residual target",
+        "10. \u03bb GP is NOT used in SSA basal drag (kl_lambda=0; plastic C law only)"
+      ],
+      "answers": {
+        "friction_C_read_correctly": true,
+        "passed_into_forward_model": true,
+        "used_in_basal_drag": true,
+        "influences_SSA_residual": true,
+        "influences_eta_gradients": true,
+        "is_learnable_parameter": false
+      }
+    },
+    "max_sliding": {
+      "cfg": "/Users/anvitakallam/Ice Dynamics/Archive/configs/totten/run_torch_vi_only_totten_max_sliding.cfg",
+      "note": "torch path unavailable (ModuleNotFoundError(\"No module named 'torch'\")); using ConfigParser value",
+      "pars.prior.friction_C": 0.001,
+      "pars.prior.friction_c": 0.001,
+      "icepack_ssa_constants.friction_C": 0.001,
+      "pipeline_steps": [
+        "1. ConfigParser optionxform=str preserves friction_C case (utilities_torch.ParameterClass)",
+        "2. pars.prior.friction_C set from cfg; lowercase alias friction_c also synced",
+        "3. Totten NPZ omits C \u2014 no cfg_json override of friction_C",
+        "4. icepack_ssa_constants(pars) \u2192 torch tensor friction_C",
+        "5. JointModel._physics_nll_ssa reads icepack['friction_C']",
+        "6. spinup_plastic_basal_drag(..., friction_C, ...) \u2192 basal_drag_{x,y}",
+        "7. SSA residual r = membrane_div(\u03b7) + \u03c4_d \u2212 basal_drag(C)",
+        "8. physics_nll = \u2212log N(r; \u03c3); phys_scale * physics_nll enters total loss",
+        "9. Gradients: C is constant (no C grads); \u03b7 VGP gets \u2202L/\u2202\u03b7 via membrane; C changes residual target",
+        "10. \u03bb GP is NOT used in SSA basal drag (kl_lambda=0; plastic C law only)"
+      ],
+      "answers": {
+        "friction_C_read_correctly": true,
+        "passed_into_forward_model": true,
+        "used_in_basal_drag": true,
+        "influences_SSA_residual": true,
+        "influences_eta_gradients": true,
+        "is_learnable_parameter": false
+      }
+    }
+  },
+  "task2_forward_sensitivity": {
+    "checkpoint": "checkpoints/torch_vi_only/totten/no_sliding/model.pt",
+    "checkpoint_epoch": 299,
+    "base_cfg": "/Users/anvitakallam/Ice Dynamics/Archive/configs/totten/run_torch_vi_only_totten_no_sliding.cfg",
+    "note": "Fast forward probe on DSI: frozen PINN only; \u03b7 held at exp(log(eta_init)+shift)\u22481.83 MPa\u00b7yr.",
+    "C=100": {
+      "friction_C_in_icepack": 100.0,
+      "eta_center_used": 1.8297636996604427,
+      "basal_drag_mean_abs": 0.025217000095854675,
+      "basal_drag_mean_abs_grounded": 0.07506455842486973,
+      "ssa_residual_rms": 0.06465900014893115,
+      "approx_momentum_nll": 0.5806647639249277,
+      "tau_c_mean": 0.039218857994360576,
+      "frac_grounded_tau_c_pos": 0.3359375,
+      "u_c_mean": 1.2837133751089163e-09,
+      "driving_stress_rms": 0.02755794242779504,
+      "membrane_div_rms": 0.019044652323406595,
+      "speed_pred_mean": 867.9477052015911,
+      "speed_pred_max": 2360.5734815003425,
+      "eta_mean": 1.8297636996604427
+    },
+    "C=0.001": {
+      "friction_C_in_icepack": 0.001,
+      "eta_center_used": 1.8297636996604427,
+      "basal_drag_mean_abs": 0.0014493377654170956,
+      "basal_drag_mean_abs_grounded": 0.004314307766822982,
+      "ssa_residual_rms": 0.034417915252794085,
+      "approx_momentum_nll": 0.16452679032618275,
+      "tau_c_mean": 0.039218857994360576,
+      "frac_grounded_tau_c_pos": 0.3359375,
+      "u_c_mean": 1283713.375108916,
+      "driving_stress_rms": 0.02755794242779504,
+      "membrane_div_rms": 0.019044652323406595,
+      "speed_pred_mean": 867.9477052015911,
+      "speed_pred_max": 2360.5734815003425,
+      "eta_mean": 1.8297636996604427
+    },
+    "delta": {
+      "basal_drag_mean_abs": 0.02376766233043758,
+      "relative_basal_drag_change": 16.4,
+      "relative_basal_drag_change_grounded": 16.398980898422693,
+      "relative_residual_change": 0.879,
+      "u_c_mean_ratio_100_over_0p001": 1e-15,
+      "approx_momentum_nll": 0.416138
+    }
+  },
+  "task4_learning": {
+    "no_sliding": {
+      "n_epochs_logged": 300,
+      "epoch_first": 0,
+      "epoch_last": 299,
+      "train_total_first": 12471.379282357939,
+      "train_total_last": -6.883690706028447,
+      "train_phys_first": 12469.478915418202,
+      "train_phys_last": -9.079181262534906,
+      "train_data_first": 1.8979613643607067,
+      "train_data_last": 1.9108459147892187,
+      "train_kl_first": 0.0024055753761382,
+      "train_kl_last": 0.2846446417172403,
+      "grad_vgp_eta_first": 7162.60422920868,
+      "grad_vgp_eta_last": 0.7560675454959176,
+      "grad_vgp_eta_median_last50": 0.7737716900625351,
+      "lr_vgp_eta_first": 0.0002999920495579992,
+      "lr_vgp_eta_last": 1e-05,
+      "phys_change_epochs_0_50": -12192.653739765758,
+      "phys_change_epochs_150_end": -3.8688850412150924,
+      "grad_ratio_last_over_first": 0.00010555763257345959,
+      "physics_plateau_after_epoch_150": true,
+      "premature_stop_likely": true,
+      "more_epochs_alone_likely_help": false
+    },
+    "max_sliding": {
+      "n_epochs_logged": 300,
+      "epoch_first": 0,
+      "epoch_last": 299,
+      "train_total_first": 12456.244926522048,
+      "train_total_last": -9.541533320285021,
+      "train_phys_first": 12454.34455933791,
+      "train_phys_last": -11.728440645412233,
+      "train_data_first": 1.8979613643607067,
+      "train_data_last": 1.9108459147892187,
+      "train_kl_first": 0.002405819777875239,
+      "train_kl_last": 0.27606141033799253,
+      "grad_vgp_eta_first": 7163.467502691838,
+      "grad_vgp_eta_last": 0.6517537220850513,
+      "grad_vgp_eta_median_last50": 0.6753522149282631,
+      "lr_vgp_eta_first": 0.0002999920495579992,
+      "lr_vgp_eta_last": 1e-05,
+      "phys_change_epochs_0_50": -12183.84790498858,
+      "phys_change_epochs_150_end": -3.6450659625756145,
+      "grad_ratio_last_over_first": 9.098299417707136e-05,
+      "physics_plateau_after_epoch_150": true,
+      "premature_stop_likely": true,
+      "more_epochs_alone_likely_help": false
+    }
+  },
+  "task5_viscosity": {
+    "no_sliding": {
+      "n": 26190,
+      "min_MPa_yr": 1.0,
+      "max_MPa_yr": 3.194359952010356,
+      "mean_MPa_yr": 1.0993388535223745,
+      "median_MPa_yr": 1.0,
+      "std_MPa_yr": 0.18362912733440104,
+      "max_over_min_ratio": 3.194359952010356,
+      "frac_at_eta_min_1": 0.5859870179457808,
+      "min_Pa_s": 31557600000000.0,
+      "max_Pa_s": 100806333621562.0,
+      "mean_Pa_s": 34692495803917.684,
+      "max_over_min_ratio_Pa_s": 3.194359952010356,
+      "expected_glacier_range_Pa_s": [
+        10000000000.0,
+        1000000000000000.0
+      ],
+      "span_orders_of_magnitude_log10": 0.5043838524298512
+    },
+    "max_sliding": {
+      "n": 26190,
+      "min_MPa_yr": 1.0,
+      "max_MPa_yr": 2.2268275346585384,
+      "mean_MPa_yr": 1.0855427767073282,
+      "median_MPa_yr": 1.0,
+      "std_MPa_yr": 0.1508978795101036,
+      "max_over_min_ratio": 2.2268275346585384,
+      "frac_at_eta_min_1": 0.5990454371897671,
+      "min_Pa_s": 31557600000000.0,
+      "max_Pa_s": 70273332607740.29,
+      "mean_Pa_s": 34257124730219.18,
+      "max_over_min_ratio_Pa_s": 2.2268275346585384,
+      "expected_glacier_range_Pa_s": [
+        10000000000.0,
+        1000000000000000.0
+      ],
+      "span_orders_of_magnitude_log10": 0.3476865827069023
+    },
+    "interpretation": "Posterior mass is heavily floored at \u03b7_min=1 MPa\u00b7yr (frac\u22480.59). max/min\u22483.19 (only 0.50 dex). In Pa\u00b7s the floor is ~3.16e13, so a ~1.5e13 Pa\u00b7s 'range' is a small absolute spread around the floor \u2014 not a multi-order physical viscosity field. This is posterior collapse / floor-pinning, not a healthy 1e10\u20131e15 Pa\u00b7s span."
+  },
+  "task6_comparison": {
+    "rows": [
+      {
+        "case": "no_sliding",
+        "friction_C": 100.0,
+        "initial_loss": 12471.379282357939,
+        "final_loss": -6.883690706028447,
+        "final_phys": -9.079181262534906,
+        "final_data": 1.9108459147892187,
+        "final_kl": 0.2846446417172403,
+        "grad_vgp_eta_last": 0.7560675454959176,
+        "inferred_mean_eta": 1.0993388535223745,
+        "inferred_eta_std": 0.18362912733440104,
+        "inferred_eta_max_min_ratio": 3.194359952010356,
+        "frac_at_floor": 0.5859870179457808
+      },
+      {
+        "case": "max_sliding",
+        "friction_C": 0.001,
+        "initial_loss": 12456.244926522048,
+        "final_loss": -9.541533320285021,
+        "final_phys": -11.728440645412233,
+        "final_data": 1.9108459147892187,
+        "final_kl": 0.27606141033799253,
+        "grad_vgp_eta_last": 0.6517537220850513,
+        "inferred_mean_eta": 1.0855427767073282,
+        "inferred_eta_std": 0.1508978795101036,
+        "inferred_eta_max_min_ratio": 2.2268275346585384,
+        "frac_at_floor": 0.5990454371897671
+      }
+    ],
+    "no_minus_max": {
+      "friction_C": 99.999,
+      "initial_loss": 15.134355835891256,
+      "final_loss": 2.657842614256574,
+      "final_phys": 2.649259382877327,
+      "final_data": 0.0,
+      "final_kl": 0.008583231379247769,
+      "grad_vgp_eta_last": 0.10431382341086626,
+      "inferred_mean_eta": 0.013796076815046243,
+      "inferred_eta_std": 0.03273124782429743,
+      "inferred_eta_max_min_ratio": 0.9675324173518174,
+      "frac_at_floor": -0.013058419243986319
+    },
+    "forward_sensitivity": {
+      "checkpoint": "checkpoints/torch_vi_only/totten/no_sliding/model.pt",
+      "checkpoint_epoch": 299,
+      "base_cfg": "/Users/anvitakallam/Ice Dynamics/Archive/configs/totten/run_torch_vi_only_totten_no_sliding.cfg",
+      "note": "Fast forward probe on DSI: frozen PINN only; \u03b7 held at exp(log(eta_init)+shift)\u22481.83 MPa\u00b7yr.",
+      "C=100": {
+        "friction_C_in_icepack": 100.0,
+        "eta_center_used": 1.8297636996604427,
+        "basal_drag_mean_abs": 0.025217000095854675,
+        "basal_drag_mean_abs_grounded": 0.07506455842486973,
+        "ssa_residual_rms": 0.06465900014893115,
+        "approx_momentum_nll": 0.5806647639249277,
+        "tau_c_mean": 0.039218857994360576,
+        "frac_grounded_tau_c_pos": 0.3359375,
+        "u_c_mean": 1.2837133751089163e-09,
+        "driving_stress_rms": 0.02755794242779504,
+        "membrane_div_rms": 0.019044652323406595,
+        "speed_pred_mean": 867.9477052015911,
+        "speed_pred_max": 2360.5734815003425,
+        "eta_mean": 1.8297636996604427
+      },
+      "C=0.001": {
+        "friction_C_in_icepack": 0.001,
+        "eta_center_used": 1.8297636996604427,
+        "basal_drag_mean_abs": 0.0014493377654170956,
+        "basal_drag_mean_abs_grounded": 0.004314307766822982,
+        "ssa_residual_rms": 0.034417915252794085,
+        "approx_momentum_nll": 0.16452679032618275,
+        "tau_c_mean": 0.039218857994360576,
+        "frac_grounded_tau_c_pos": 0.3359375,
+        "u_c_mean": 1283713.375108916,
+        "driving_stress_rms": 0.02755794242779504,
+        "membrane_div_rms": 0.019044652323406595,
+        "speed_pred_mean": 867.9477052015911,
+        "speed_pred_max": 2360.5734815003425,
+        "eta_mean": 1.8297636996604427
+      },
+      "delta": {
+        "basal_drag_mean_abs": 0.02376766233043758,
+        "relative_basal_drag_change": 16.4,
+        "relative_basal_drag_change_grounded": 16.398980898422693,
+        "relative_residual_change": 0.879,
+        "u_c_mean_ratio_100_over_0p001": 1e-15,
+        "approx_momentum_nll": 0.416138
+      }
+    },
+    "nearly_identical": true
+  },
+  "root_cause": "C is correctly wired and DOES change SSA basal drag / residuals (forward |\u03c4_b| relative \u0394\u224816.4 between C=100 and 0.001). The nearly identical no/max sliding *results* are instead explained by \u03b7 posterior collapse onto \u03b7_min=1 (median=1, ~60% at floor; eta_log_shift\u2248\u22122.1). With \u03b7 clipped, membrane stress cannot express C-dependent spatial structure, so inferred maps and late-training losses converge to the same floored solution. Units are consistent; this is not a missing-C bug or a bare-g=9.81 bug.",
+  "executive_summary": "C cfg values preserved (True). Icepack SSA units consistent (True). Forward |\u03c4_b| relative sensitivity to C: 16.4 (strong). Inferred \u03b7 floored: frac(\u03b7\u22641)\u22480.59, max/min\u22483.19. Primary failure mode: \u03b7 posterior collapse to \u03b7_min \u2014 NOT a silent C drop and NOT a missing MPa\u00b7yr rescale of g. More epochs alone will not help.",
+  "recommended_fixes": [
+    "Do not \"fix\" units by changing g=9.81 in SSA \u2014 icepack scaling is already correct.",
+    "Instrument training to log mean |basal_drag|, mean \u03c4_c, mean u_c, friction_C, and frac(\u03b7\u2264\u03b7_min) each epoch.",
+    "Address \u03b7 floor collapse before trusting sliding end-members: re-center prior (eta_init / eta_log_shift / eta_prior) and/or raise \u03b7_min carefully so the field is not clipped.",
+    "Only ~34% of probe points have \u03c4_c>0. Prefer grounded-masked diagnostics, but C sensitivity is already strong \u2014 prioritize \u03b7-floor fixes.",
+    "More epochs alone will not help: physics loss and \u2016\u2207\u03b7\u2016 plateau by ~epoch 100\u2013150.",
+    "Optional ablation: ssa_use_inferred_eta=False to confirm basal-C signal in physics NLL without \u03b7 absorbing everything into the floor."
+  ]
+}

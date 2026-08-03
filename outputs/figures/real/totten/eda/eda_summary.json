@@ -1,0 +1,90 @@
+{
+  "source": "data/real/totten/totten_archive_vi_2022.npz",
+  "shape_ny_nx": [
+    318,
+    174
+  ],
+  "domain_km": {
+    "Lx": 86.5,
+    "Ly": 158.5,
+    "resolution_m": 500.0
+  },
+  "geom_finite_fraction": 0.47332465842550425,
+  "floating_fraction_of_geom": 0.7407789232531501,
+  "grounded_fraction_of_geom": 0.25922107674684997,
+  "bed_equals_ice_base": true,
+  "notes": "bed == s - h everywhere on finite cells (ice-base elevation, not ocean-floor bathymetry; no cavity thickness in this product). HAF uses hydrostatic freeboard from s and h only.",
+  "thickness_m": {
+    "count": 26190,
+    "min": 200.5070083195421,
+    "p05": 512.3204532456298,
+    "median": 1273.4559452522403,
+    "p95": 2381.4628749293724,
+    "max": 2894.6602542249307,
+    "mean": 1351.9068320418062
+  },
+  "surface_m": {
+    "count": 26190,
+    "min": 9.74839746503109,
+    "p05": 42.541916553445446,
+    "median": 103.08669769033285,
+    "p95": 222.45001214078295,
+    "max": 312.41552455578005,
+    "mean": 113.5200050085874
+  },
+  "bed_m": {
+    "count": 26190,
+    "min": -2740.0,
+    "p05": -2219.0,
+    "median": -1161.0,
+    "p95": -460.0,
+    "max": -156.0,
+    "mean": -1238.3868270332189
+  },
+  "haf_m": {
+    "count": 26190,
+    "min": -162.59079608185078,
+    "p05": -122.52096396651737,
+    "median": -26.36621511047224,
+    "p95": 34.139285293820436,
+    "max": 160.27652744393745,
+    "mean": -32.45437082472039
+  },
+  "speed_m_per_yr": {
+    "count": 26190,
+    "min": 13.422628250637358,
+    "p05": 87.78157733123057,
+    "median": 860.7689612817056,
+    "p95": 2032.700397483594,
+    "max": 2514.492435047868,
+    "mean": 870.4314438050264
+  },
+  "surface_slope": {
+    "count": 26190,
+    "min": 7.149191918414373e-05,
+    "p05": 0.0011853823248891473,
+    "median": 0.005847955586086296,
+    "p95": 0.023664541561647236,
+    "max": 0.29317231448546077,
+    "mean": 0.009726198639454588
+  },
+  "errors": {
+    "surf_err_median_m": 5.0,
+    "bed_err_median_m": 155.0,
+    "ux_err_median_m_per_yr": 51.837123521713295,
+    "uy_err_median_m_per_yr": 58.48650832641995
+  },
+  "transects": {
+    "max_speed_row_y_km": -1144.25,
+    "max_speed_m_per_yr": 2514.492435047868,
+    "max_thickness_row_y_km": -1048.75,
+    "max_thickness_m": 2894.6602542249307
+  },
+  "figures": [
+    "outputs/figures/real/totten/eda/geometry_overview.png",
+    "outputs/figures/real/totten/eda/grounding_and_flow.png",
+    "outputs/figures/real/totten/eda/observation_errors.png",
+    "outputs/figures/real/totten/eda/geometry_profiles.png",
+    "outputs/figures/real/totten/eda/geometry_histograms.png"
+  ]
+}
